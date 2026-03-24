@@ -132,19 +132,31 @@ async def onboarding_handle_coaching(message: Message, state: FSMContext) -> Non
     # Temporary mock implementation for fast AI response
     from bot.services.ai_service import _chat
     
-    prompt = f"Пользователь ищет работу. Он описал свои интересы: '{text}'. Предложи 3 конкретные должности на рынке СНГ, которые могут ему подойти, сопроводи кратким ободряющим комментарием. Ответ должен быть мотивирующим и коротким. Формат списка."
+    prompt = f"Пользователь ищет работу. Он описал свои интересы: '{text}'. Выдели ровно 1 ключевой запрос (до 3 слов) для поиска вакансий на hh.ru по этой специальности. Выведи только этот короткий запрос."
     
-    wait_msg = await message.answer("Анализирую ваши сильные стороны... 🤖")
+    wait_msg = await message.answer("Анализирую ваши сильные стороны на рынке (hh.ru)... 🤖")
     
     try:
-        response = await _chat(
-            system="Ты профессиональный карьерный коуч и HR-специалист.",
+        from bot.services.ai_service import _chat
+        from bot.services.hh_service import analyze_market_salary
+        query = await _chat(
+            system="Ты точный алгоритм извлечения ключевых слов.",
             user=prompt, 
             model="gpt-4o-mini", 
-            temperature=0.7
+            temperature=0.1
         )
+        query = query.strip('\'". \n')
+        
+        hh_data = await analyze_market_salary(query)
         await wait_msg.delete()
-        await message.answer(f"Вот что я увидел в ваших ответах:\n\n{response}\n\nНапишите ниже должность, которую вы выбираете для этого резюме:")
+        
+        if not hh_data.get("titles"):
+            await message.answer("Я не нашел массовых вакансий по этому запросу. Напишите какую-нибудь должность вручную для старта:")
+            await state.set_state(OnboardingStates.waiting_desired_position)
+            return
+
+        titles_str = "\n".join(f"• {t}" for t in hh_data["titles"][:3])
+        await message.answer(f"Я проанализировал рынок hh.ru!\nВам отлично подойдут такие роли:\n{titles_str}\n\n{hh_data['text']}\n\nНапишите ниже должность, которую вы выбираете для этого резюме:")
         await state.set_state(OnboardingStates.waiting_desired_position)
     except Exception as e:
         logger.error(f"Error in coaching: {e}")
@@ -319,46 +331,19 @@ async def _process_uploaded_document(message: Message, state: FSMContext, bot: B
             
         await state.update_data(parsed_from_file=True, **merged_data)
         
-        # Check what needs to be filled next
-        we = merged_data.get("work_experiences", [])
-        if not we:
-            await processing_msg.edit_text("Я извлек основные данные, но не нашел подробного опыта работы. Давайте заполним его вместе.")
-            from bot.handlers.interview import ask_summary
-            await state.set_state(InterviewStates.work_experience_company)
-            await message.answer("Укажите название компании (последнее или текущее место работы).")
-            return
-            
-        # Check if achievements are missing in the last job
-        last_job = we[0] if isinstance(we, list) and len(we) > 0 else {}
-        achievements = last_job.get("achievements", [])
+        await processing_msg.edit_text("Я извлек основные данные. Сейчас я проведу быстрый аудит вашего резюме на соответствие требованиям рынка (ATS)... 🤖")
+        from bot.services.ai_service import evaluate_parsed_resume
+        critique = await evaluate_parsed_resume(merged_data)
         
-        if not achievements:
-            await processing_msg.edit_text(f"Я прочитал твой опыт в {last_job.get('company', 'компании')}, но там не описаны достижения. Для ATS-систем они очень важны (цифры, факты, рост). Давай добавим их.")
-            await state.update_data(
-                current_company=last_job.get('company', ''),
-                current_role=last_job.get('position', ''),
-                current_dates=f"{last_job.get('start_date', '')} - {last_job.get('end_date', '')}",
-                current_responsibilities=last_job.get('description', '')
-            )
-            await state.set_state(InterviewStates.work_experience_achievements)
-            return
-
-        # Jump to skills if experience is fine
-        if not merged_data.get("skills"):
-            await processing_msg.edit_text("Я извлек ваш опыт работы, но раздел навыков пуст. Давайте заполним навыки.")
-            from bot.handlers.interview import _start_skills_stage
-            await _start_skills_stage(message, state)
-            return
-            
-        # Jump to extras if everything else is fine
-        await processing_msg.edit_text("Супер! Я успешно прочитал твоё резюме. Опыт и навыки заполнены, достижения тоже есть. Давай перейдём к последнему шагу.")
-        await state.set_state(InterviewStates.extras_input)
+        from bot.states import ImprovementStates
         await message.answer(
-            "Последний этап. Укажите дополнительную информацию:\n"
-            "— Желаемый уровень зарплаты\n"
-            "— Формат работы\n"
-            "— Если ничего не нужно, напишите «нет»."
+            f"Вот что у нас получилось:\n\n{critique}\n\nДавайте перейдем к исправлению слабых мест?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Да, начнем исправлять", callback_data="start_improving")],
+                [InlineKeyboardButton(text="Нет, оставить как есть", callback_data="skip_improving")]
+            ])
         )
+        await state.set_state(ImprovementStates.reviewing_parsed_data)
 
     except Exception as e:
         logger.error(f"Error parsing document: {e}")
@@ -366,6 +351,46 @@ async def _process_uploaded_document(message: Message, state: FSMContext, bot: B
             "Произошла ошибка при анализе файла. Давайте продолжим вручную — это займёт 5–7 минут."
         )
         await _start_interview(message, state)
+
+
+@router.callback_query(F.data == "start_improving")
+async def cb_start_improving(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    we = data.get("work_experiences", [])
+    
+    if we:
+        last_job = we[0]
+        await state.update_data(
+            current_company=last_job.get("company", ""),
+            current_role=last_job.get("position", ""),
+            current_dates=f"{last_job.get('start_date', '')} - {last_job.get('end_date', '')}",
+            current_responsibilities=last_job.get("description", "")
+        )
+        from bot.states import InterviewStates
+        await state.set_state(InterviewStates.work_experience_achievements)
+        await callback.message.answer(
+            f"Начнем с последнего места работы: {last_job.get('company', 'компания')}.\n"
+            "Здесь не хватает измеримых достижений.\n"
+            "Какими результатами вы больше всего гордитесь на этой позиции? (На сколько процентов выросли продажи, сколько времени сэкономили и т.д.)"
+        )
+    else:
+        from bot.handlers.interview import _start_skills_stage
+        await callback.message.answer("Опыта работы не найдено, давайте перейдем к навыкам.")
+        await _start_skills_stage(callback.message, state)
+
+
+@router.callback_query(F.data == "skip_improving")
+async def cb_skip_improving(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    from bot.states import InterviewStates
+    await state.set_state(InterviewStates.extras_input)
+    await callback.message.answer(
+        "Последний этап. Укажите дополнительную информацию:\n"
+        "— Желаемый уровень зарплаты\n"
+        "— Формат работы\n"
+        "— Если ничего не нужно, напишите «нет»."
+    )
 
 
 async def _start_interview(message: Message, state: FSMContext) -> None:

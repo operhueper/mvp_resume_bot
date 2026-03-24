@@ -24,6 +24,11 @@ class InterviewStates(StatesGroup):
     education_input = State()
     extras_input = State()
 
+class ImprovementStates(StatesGroup):
+    reviewing_parsed_data = State()
+    improving_work_experience = State()
+    confirm_improved_experience = State()
+
 
 class ResumeStates(StatesGroup):
     viewing_draft = State()

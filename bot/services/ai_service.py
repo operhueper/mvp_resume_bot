@@ -243,6 +243,27 @@ async def parse_resume_file(text: str) -> dict:
     return result
 
 
+async def evaluate_parsed_resume(profile_data: dict) -> str:
+    """Critique the parsed resume from the ATS point of view."""
+    system = (
+        "You are an ATS-expert and strict HR manager. The user uploaded their resume. "
+        "Review the parsed JSON data. Identify 2-3 specific weaknesses out of these: "
+        "1. Lack of numbers/metrics in work experience. "
+        "2. Vague responsibilities. "
+        "3. Missing key skills. "
+        "Write a short, friendly message in Russian. Praise what's good, but clearly point out the problems. "
+        "Keep it under 4 sentences. Do NOT rewrite the resume, just give the critique."
+    )
+    user = f"Parsed resume data:\n\n{json.dumps(profile_data, ensure_ascii=False)}"
+    return await _chat(
+        model="gpt-4o-mini",
+        system=system,
+        user=user,
+        temperature=0.3,
+        max_tokens=300,
+    )
+
+
 _RESUME_SYSTEM_PROMPT = """\
 You are a professional Russian-language resume writer specialising in hh.ru.
 Your task: write a complete, ATS-optimised resume for the given position.
