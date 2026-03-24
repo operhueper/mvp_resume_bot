@@ -51,7 +51,8 @@ class VoiceToTextMiddleware(BaseMiddleware):
             await event.answer(f"🎙 Распознано: «{transcription}»")
 
             # Inject transcription as text so all text handlers process it normally
-            event.text = transcription
+            # object.__setattr__ bypasses pydantic v2 frozen-model protection
+            object.__setattr__(event, "text", transcription)
 
         except Exception as exc:
             logger.warning("Voice transcription failed: %s", exc)
