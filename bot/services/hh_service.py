@@ -18,7 +18,7 @@ async def fetch_hh_vacancies(text_query: str, per_page: int = 20) -> list[dict]:
     }
     
     headers = {
-        "User-Agent": "ResumeBot/1.0 (test@example.com)"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
     try:

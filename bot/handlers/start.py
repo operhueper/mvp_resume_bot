@@ -151,17 +151,21 @@ async def onboarding_handle_coaching(message: Message, state: FSMContext) -> Non
         await wait_msg.delete()
         
         if not hh_data.get("titles"):
-            await message.answer("Я не нашел массовых вакансий по этому запросу. Напишите какую-нибудь должность вручную для старта:")
+            await message.answer(f"ИИ сгенерировал вот такой странный запрос для поиска: «{query}». На hh.ru по нему ничего нормального нет.\n\nНапишите ниже какую-нибудь должность вручную для старта:")
             await state.set_state(OnboardingStates.waiting_desired_position)
             return
 
         titles_str = "\n".join(f"• {t}" for t in hh_data["titles"][:3])
-        await message.answer(f"Я проанализировал рынок hh.ru!\nВам отлично подойдут такие роли:\n{titles_str}\n\n{hh_data['text']}\n\nНапишите ниже должность, которую вы выбираете для этого резюме:")
+        await message.answer(f"Я проанализировал рынок hh.ru по запросу «{query}»!\nВам отлично подойдут такие роли:\n{titles_str}\n\n{hh_data['text']}\n\nНапишите ниже должность, которую вы выбираете для этого резюме:")
         await state.set_state(OnboardingStates.waiting_desired_position)
     except Exception as e:
         logger.error(f"Error in coaching: {e}")
-        await wait_msg.delete()
-        await message.answer("Извините, не удалось подключиться к ИИ. Напишите какую-нибудь должность вручную для старта:")
+        try:
+            await wait_msg.delete()
+        except:
+            pass
+        q_text = locals().get('query', 'неизвестно')
+        await message.answer(f"Извините, произошел сбой при обращении к рынку (запрос: {q_text}, ошибка: {e}). Напишите должность вручную:")
         await state.set_state(OnboardingStates.waiting_desired_position)
 
 
