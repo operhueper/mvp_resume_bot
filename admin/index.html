@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Resume Bot — Admin Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --sidebar-w: 220px;
+      --bg: #f5f6fa;
+      --surface: #ffffff;
+      --sidebar-bg: #1a1d2e;
+      --sidebar-text: #a0a8c0;
+      --sidebar-active: #ffffff;
+      --accent: #5b6cf7;
+      --accent-light: #eef0ff;
+      --danger: #e95f5f;
+      --success: #4caf7d;
+      --warn: #f5a623;
+      --text: #1a1d2e;
+      --muted: #7a7f9a;
+      --border: #e8eaf2;
+      --radius: 10px;
+      --shadow: 0 2px 12px rgba(0,0,0,0.07);
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      min-height: 100vh;
+    }
+
+    /* ── Sidebar ── */
+    aside {
+      width: var(--sidebar-w);
+      background: var(--sidebar-bg);
+      display: flex;
+      flex-direction: column;
+      position: fixed;
+      top: 0; left: 0; bottom: 0;
+      z-index: 100;
+    }
+
+    .logo {
+      padding: 24px 20px 20px;
+      color: var(--sidebar-active);
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+
+    .logo span { color: var(--accent); }
+
+    nav { flex: 1; padding: 16px 0; }
+
+    nav a {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 11px 20px;
+      color: var(--sidebar-text);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: color 0.15s, background 0.15s;
+      border-left: 3px solid transparent;
+    }
+
+    nav a.active, nav a:hover {
+      color: var(--sidebar-active);
+      background: rgba(255,255,255,0.05);
+      border-left-color: var(--accent);
+    }
+
+    nav a svg { opacity: 0.7; flex-shrink: 0; }
+    nav a.active svg, nav a:hover svg { opacity: 1; }
+
+    .sidebar-footer {
+      padding: 16px 20px;
+      border-top: 1px solid rgba(255,255,255,0.07);
+      font-size: 12px;
+      color: var(--sidebar-text);
+    }
+
+    #refresh-status { font-size: 11px; margin-top: 4px; opacity: 0.6; }
+
+    /* ── Main ── */
+    main {
+      margin-left: var(--sidebar-w);
+      flex: 1;
+      padding: 28px 32px;
+      min-width: 0;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 28px;
+    }
+
+    .topbar h1 { font-size: 22px; font-weight: 700; }
+
+    .topbar-right { display: flex; align-items: center; gap: 12px; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .badge-green { background: #e8f8f0; color: var(--success); }
+    .badge-red   { background: #fdeaea; color: var(--danger); }
+
+    .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+    }
+
+    .dot-green { background: var(--success); }
+    .dot-red   { background: var(--danger); }
+
+    btn, button {
+      cursor: pointer;
+      border: none;
+      outline: none;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      padding: 8px 18px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-weight: 600;
+      border: none;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    .btn-primary:hover { opacity: 0.87; }
+
+    /* ── Grid ── */
+    .grid-4 {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 18px;
+      margin-bottom: 24px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-bottom: 24px;
+    }
+
+    @media (max-width: 1100px) { .grid-4 { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 800px)  { .grid-4, .grid-2 { grid-template-columns: 1fr; } }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 22px 24px;
+    }
+
+    .card-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      margin-bottom: 8px;
+    }
+
+    .card-value {
+      font-size: 34px;
+      font-weight: 800;
+      line-height: 1;
+      color: var(--text);
+    }
+
+    .card-sub {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+
+    .card-accent { border-top: 3px solid var(--accent); }
+    .card-success { border-top: 3px solid var(--success); }
+    .card-warn    { border-top: 3px solid var(--warn); }
+    .card-danger  { border-top: 3px solid var(--danger); }
+
+    /* ── Funnel ── */
+    .funnel-card { padding: 24px 28px; }
+
+    .funnel-card h2 { font-size: 15px; font-weight: 700; margin-bottom: 20px; }
+
+    .funnel { display: flex; align-items: flex-end; gap: 0; width: 100%; }
+
+    .funnel-step {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      position: relative;
+    }
+
+    .funnel-step:not(:last-child)::after {
+      content: '→';
+      position: absolute;
+      right: -10px;
+      bottom: 56px;
+      font-size: 18px;
+      color: var(--muted);
+      z-index: 1;
+    }
+
+    .funnel-bar-wrap {
+      width: 70%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .funnel-bar {
+      width: 100%;
+      border-radius: 6px 6px 0 0;
+      transition: height 0.5s ease;
+      min-height: 4px;
+    }
+
+    .funnel-count { font-size: 18px; font-weight: 800; margin-top: 6px; }
+    .funnel-label { font-size: 12px; font-weight: 600; color: var(--muted); margin-top: 3px; text-align: center; }
+    .funnel-pct   { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+    /* ── Table ── */
+    .table-card { padding: 0; overflow: hidden; }
+
+    .table-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .table-header h2 { font-size: 15px; font-weight: 700; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    thead th {
+      background: var(--bg);
+      padding: 10px 16px;
+      text-align: left;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    tbody tr { border-bottom: 1px solid var(--border); transition: background 0.1s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--bg); }
+
+    td {
+      padding: 11px 16px;
+      vertical-align: middle;
+      color: var(--text);
+    }
+
+    .event-pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .pill-bot_started          { background: #e8f0ff; color: #4060d0; }
+    .pill-onboarding_completed { background: #e8f8f0; color: #3a9c68; }
+    .pill-interview_started    { background: #fff4e0; color: #b07a10; }
+    .pill-interview_completed  { background: #fef3e8; color: #c06820; }
+    .pill-resume_generated     { background: #f0eaff; color: #7040c0; }
+    .pill-resume_exported      { background: #e0f7fa; color: #00838f; }
+    .pill-profile_deleted      { background: #fdeaea; color: #c04040; }
+    .pill-default              { background: var(--border); color: var(--muted); }
+
+    .meta-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; font-family: monospace; }
+
+    /* ── Login overlay ── */
+    #login-overlay {
+      position: fixed;
+      inset: 0;
+      background: var(--sidebar-bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+
+    .login-box {
+      background: #232640;
+      border-radius: 14px;
+      padding: 40px 44px;
+      width: 360px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+      text-align: center;
+    }
+
+    .login-box h2 { color: #fff; font-size: 20px; margin-bottom: 8px; }
+    .login-box p  { color: var(--sidebar-text); font-size: 13px; margin-bottom: 28px; }
+
+    .login-box input {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.07);
+      color: #fff;
+      font-size: 14px;
+      margin-bottom: 14px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .login-box input:focus { border-color: var(--accent); }
+
+    .login-box input::placeholder { color: rgba(255,255,255,0.3); }
+
+    .login-box .btn-login {
+      width: 100%;
+      padding: 12px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+
+    .login-box .btn-login:hover { opacity: 0.87; }
+
+    .login-error {
+      color: var(--danger);
+      font-size: 12px;
+      margin-top: 10px;
+      min-height: 16px;
+    }
+
+    /* ── Loading spinner ── */
+    .spinner {
+      display: inline-block;
+      width: 18px; height: 18px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .loading-row td { text-align: center; padding: 32px; color: var(--muted); }
+
+    /* ── Misc ── */
+    .section-title { font-size: 15px; font-weight: 700; margin-bottom: 16px; }
+
+    .text-right { text-align: right; }
+    .text-muted  { color: var(--muted); }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<!-- Login overlay -->
+<div id="login-overlay">
+  <div class="login-box">
+    <h2>Resume Bot Admin</h2>
+    <p>Введите секретный ключ для входа</p>
+    <input type="password" id="secret-input" placeholder="Admin secret" autocomplete="off" />
+    <button class="btn-login" id="login-btn">Войти</button>
+    <div class="login-error" id="login-error"></div>
+  </div>
+</div>
+
+<!-- Sidebar -->
+<aside>
+  <div class="logo">Resume<span>Bot</span> Admin</div>
+  <nav>
+    <a href="#" class="active">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+        <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+      </svg>
+      Обзор
+    </a>
+    <a href="#funnel-section">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+      </svg>
+      Воронка
+    </a>
+    <a href="#events-section">
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+        <line x1="16" y1="13" x2="8" y2="13"/>
+        <line x1="16" y1="17" x2="8" y2="17"/>
+        <polyline points="10 9 9 9 8 9"/>
+      </svg>
+      События
+    </a>
+  </nav>
+  <div class="sidebar-footer">
+    Автообновление: 30с
+    <div id="refresh-status">Последнее обновление: —</div>
+  </div>
+</aside>
+
+<!-- Main content -->
+<main id="app" class="hidden">
+
+  <div class="topbar">
+    <h1>Обзор</h1>
+    <div class="topbar-right">
+      <div class="badge badge-green" id="conn-status">
+        <span class="dot dot-green"></span> Подключено
+      </div>
+      <button class="btn-primary" id="refresh-btn">Обновить</button>
+    </div>
+  </div>
+
+  <!-- KPI Cards -->
+  <div class="grid-4">
+    <div class="card card-accent">
+      <div class="card-label">Всего пользователей</div>
+      <div class="card-value" id="kpi-total">—</div>
+      <div class="card-sub">зарегистрировано за всё время</div>
+    </div>
+    <div class="card card-success">
+      <div class="card-label">DAU (24ч)</div>
+      <div class="card-value" id="kpi-dau">—</div>
+      <div class="card-sub">активных за последние 24 часа</div>
+    </div>
+    <div class="card card-warn">
+      <div class="card-label">Конверсия онбординг → резюме</div>
+      <div class="card-value" id="kpi-conv">—</div>
+      <div class="card-sub">из тех, кто начал</div>
+    </div>
+    <div class="card card-danger">
+      <div class="card-label">Резюме экспортировано</div>
+      <div class="card-value" id="kpi-exported">—</div>
+      <div class="card-sub">всего экспортов</div>
+    </div>
+  </div>
+
+  <!-- Stage counts -->
+  <div class="grid-4" style="margin-bottom:24px">
+    <div class="card">
+      <div class="card-label">Онбординг</div>
+      <div class="card-value" id="stage-onboarding">—</div>
+      <div class="card-sub">текущая стадия</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Интервью</div>
+      <div class="card-value" id="stage-interview">—</div>
+      <div class="card-sub">текущая стадия</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Черновик</div>
+      <div class="card-value" id="stage-draft">—</div>
+      <div class="card-sub">текущая стадия</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Экспорт</div>
+      <div class="card-value" id="stage-exported">—</div>
+      <div class="card-sub">текущая стадия</div>
+    </div>
+  </div>
+
+  <!-- Funnel -->
+  <div id="funnel-section" class="card funnel-card" style="margin-bottom:24px">
+    <h2>Воронка конверсии</h2>
+    <div class="funnel" id="funnel-chart">
+      <!-- Rendered by JS -->
+    </div>
+  </div>
+
+  <!-- Events table -->
+  <div id="events-section" class="card table-card">
+    <div class="table-header">
+      <h2>Последние события <span class="text-muted" style="font-weight:400;font-size:13px">(50 шт.)</span></h2>
+      <span id="events-count" class="text-muted" style="font-size:13px"></span>
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>Тип события</th>
+            <th>Пользователь</th>
+            <th>Метаданные</th>
+            <th class="text-right">Время</th>
+          </tr>
+        </thead>
+        <tbody id="events-tbody">
+          <tr class="loading-row"><td colspan="4"><span class="spinner"></span> Загрузка...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</main>
+
+<script type="module">
+  // ── Config (replaced by sed during deploy) ──────────────────────────────
+  const SUPABASE_URL     = '__SUPABASE_URL__';     // replaced by sed during deploy
+  const SUPABASE_ANON_KEY = '__SUPABASE_ANON_KEY__'; // replaced by sed during deploy
+
+  // ── Supabase client (CDN) ────────────────────────────────────────────────
+  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+  let supabase = null;
+
+  // ── Admin secret auth ────────────────────────────────────────────────────
+  const ADMIN_SECRET = typeof window.ADMIN_SECRET !== 'undefined'
+    ? window.ADMIN_SECRET
+    : null;
+
+  const overlay   = document.getElementById('login-overlay');
+  const app       = document.getElementById('app');
+  const loginBtn  = document.getElementById('login-btn');
+  const secretInp = document.getElementById('secret-input');
+  const loginErr  = document.getElementById('login-error');
+
+  let storedSecret = sessionStorage.getItem('admin_secret');
+
+  function attemptLogin(secret) {
+    // We validate by trying a Supabase query; if ADMIN_SECRET is set, compare locally first.
+    if (ADMIN_SECRET && secret !== ADMIN_SECRET) {
+      loginErr.textContent = 'Неверный секрет.';
+      return;
+    }
+    sessionStorage.setItem('admin_secret', secret);
+    supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      global: { headers: { 'x-admin-secret': secret } }
+    });
+    overlay.classList.add('hidden');
+    app.classList.remove('hidden');
+    loadAll();
+    startAutoRefresh();
+  }
+
+  loginBtn.addEventListener('click', () => attemptLogin(secretInp.value.trim()));
+  secretInp.addEventListener('keydown', e => { if (e.key === 'Enter') loginBtn.click(); });
+
+  if (storedSecret) {
+    attemptLogin(storedSecret);
+  }
+
+  // ── Data loading ─────────────────────────────────────────────────────────
+  async function loadAll() {
+    document.getElementById('refresh-status').textContent = 'Загрузка...';
+    try {
+      await Promise.all([loadStats(), loadEvents()]);
+      const now = new Date();
+      document.getElementById('refresh-status').textContent =
+        `Обновлено: ${now.toLocaleTimeString('ru-RU')}`;
+      setConnStatus(true);
+    } catch (err) {
+      console.error(err);
+      setConnStatus(false);
+      document.getElementById('refresh-status').textContent = 'Ошибка загрузки';
+    }
+  }
+
+  function setConnStatus(ok) {
+    const el = document.getElementById('conn-status');
+    el.className = `badge ${ok ? 'badge-green' : 'badge-red'}`;
+    el.innerHTML = `<span class="dot ${ok ? 'dot-green' : 'dot-red'}"></span> ${ok ? 'Подключено' : 'Ошибка'}`;
+  }
+
+  async function loadStats() {
+    // Total users
+    const { count: total } = await supabase
+      .from('users').select('*', { count: 'exact', head: true });
+
+    // DAU
+    const since24h = new Date(Date.now() - 86400000).toISOString();
+    const { count: dau } = await supabase
+      .from('users')
+      .select('*', { count: 'exact', head: true })
+      .gte('last_active_at', since24h);
+
+    // Stage counts
+    const stages = ['onboarding', 'interview', 'draft', 'exported'];
+    const stageCounts = {};
+    await Promise.all(stages.map(async stage => {
+      const { count } = await supabase
+        .from('users')
+        .select('*', { count: 'exact', head: true })
+        .eq('current_stage', stage);
+      stageCounts[stage] = count || 0;
+    }));
+
+    // Exported event count
+    const { count: exported } = await supabase
+      .from('events')
+      .select('*', { count: 'exact', head: true })
+      .eq('event_type', 'resume_exported');
+
+    // Render KPIs
+    setText('kpi-total', fmt(total));
+    setText('kpi-dau',   fmt(dau));
+    setText('kpi-exported', fmt(exported));
+
+    const conv = total > 0
+      ? Math.round(((stageCounts.draft + stageCounts.exported) / total) * 100) + '%'
+      : '—';
+    setText('kpi-conv', conv);
+
+    stages.forEach(s => setText(`stage-${s}`, fmt(stageCounts[s])));
+
+    // Funnel
+    renderFunnel([
+      { label: 'Онбординг', count: (stageCounts.onboarding || 0) + (stageCounts.interview || 0) + (stageCounts.draft || 0) + (stageCounts.exported || 0), color: '#5b6cf7' },
+      { label: 'Интервью',  count: (stageCounts.interview || 0) + (stageCounts.draft || 0) + (stageCounts.exported || 0), color: '#f5a623' },
+      { label: 'Черновик',  count: (stageCounts.draft || 0) + (stageCounts.exported || 0), color: '#4caf7d' },
+      { label: 'Экспорт',   count: stageCounts.exported || 0, color: '#e95f5f' },
+    ]);
+  }
+
+  async function loadEvents() {
+    const { data, error } = await supabase
+      .from('events')
+      .select('id, event_type, metadata, created_at, user_id')
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (error) throw error;
+
+    const tbody = document.getElementById('events-tbody');
+    if (!data || data.length === 0) {
+      tbody.innerHTML = '<tr class="loading-row"><td colspan="4">Нет событий</td></tr>';
+      return;
+    }
+
+    document.getElementById('events-count').textContent = `${data.length} записей`;
+
+    tbody.innerHTML = data.map(ev => {
+      const pill = pillClass(ev.event_type);
+      const meta = ev.metadata ? JSON.stringify(ev.metadata) : '';
+      const uid  = ev.user_id ? ev.user_id.slice(0, 8) + '...' : '—';
+      const time = formatTime(ev.created_at);
+      return `
+        <tr>
+          <td><span class="event-pill ${pill}">${ev.event_type}</span></td>
+          <td style="font-size:12px;font-family:monospace;color:var(--muted)">${uid}</td>
+          <td><div class="meta-cell" title="${escHtml(meta)}">${escHtml(meta)}</div></td>
+          <td class="text-right" style="white-space:nowrap;color:var(--muted);font-size:12px">${time}</td>
+        </tr>`;
+    }).join('');
+  }
+
+  // ── Funnel renderer ──────────────────────────────────────────────────────
+  function renderFunnel(steps) {
+    const max = steps[0]?.count || 1;
+    const MAX_H = 160;
+
+    const html = steps.map((s, i) => {
+      const h = max > 0 ? Math.max(Math.round((s.count / max) * MAX_H), 4) : 4;
+      const pct = i === 0 ? '100%' : (steps[0].count > 0
+        ? Math.round((s.count / steps[0].count) * 100) + '%' : '0%');
+      return `
+        <div class="funnel-step">
+          <div class="funnel-bar-wrap">
+            <div class="funnel-bar" style="height:${h}px;background:${s.color}"></div>
+            <div class="funnel-count">${fmt(s.count)}</div>
+            <div class="funnel-label">${s.label}</div>
+            <div class="funnel-pct">${pct}</div>
+          </div>
+        </div>`;
+    }).join('');
+
+    document.getElementById('funnel-chart').innerHTML = html;
+  }
+
+  // ── Auto-refresh ─────────────────────────────────────────────────────────
+  let refreshTimer = null;
+
+  function startAutoRefresh() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(loadAll, 30000);
+  }
+
+  document.getElementById('refresh-btn').addEventListener('click', loadAll);
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+  function setText(id, val) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val ?? '—';
+  }
+
+  function fmt(n) { return n != null ? n.toLocaleString('ru-RU') : '—'; }
+
+  function escHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function pillClass(type) {
+    const known = [
+      'bot_started','onboarding_completed','interview_started',
+      'interview_completed','resume_generated','resume_exported','profile_deleted'
+    ];
+    return known.includes(type) ? `pill-${type}` : 'pill-default';
+  }
+
+  function formatTime(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    const now = new Date();
+    const diff = Math.floor((now - d) / 1000);
+    if (diff < 60)   return `${diff}с назад`;
+    if (diff < 3600) return `${Math.floor(diff/60)}м назад`;
+    if (diff < 86400) return `${Math.floor(diff/3600)}ч назад`;
+    return d.toLocaleDateString('ru-RU', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
+  }
+</script>
+</body>
+</html>
