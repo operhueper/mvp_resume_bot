@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -15,6 +15,9 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+import os
+import fitz
+import docx
 
 import bot.database as db
 from bot.states import OnboardingStates, InterviewStates, ResumeStates
@@ -227,15 +230,15 @@ async def onboarding_city(message: Message, state: FSMContext) -> None:
 
 
 @router.message(OnboardingStates.upload_resume_prompt)
-async def onboarding_upload_prompt(message: Message, state: FSMContext) -> None:
+async def onboarding_upload_prompt(message: Message, state: FSMContext, bot: Bot) -> None:
     text = (message.text or "").strip().lower()
 
     if message.document:
         await state.set_state(OnboardingStates.processing_upload)
-        await message.answer(
-            "Файл получен. Обработка... Это займёт несколько секунд."
+        processing_msg = await message.answer(
+            "Файл получен. Анализирую резюме с помощью ИИ... Это займёт около 10-15 секунд 🤖"
         )
-        # Actual parsing is handled in the document handler below
+        await _process_uploaded_document(message, state, bot, processing_msg)
         return
 
     # User skipped upload
@@ -243,13 +246,121 @@ async def onboarding_upload_prompt(message: Message, state: FSMContext) -> None:
 
 
 @router.message(OnboardingStates.processing_upload, F.document)
-async def onboarding_document(message: Message, state: FSMContext) -> None:
-    # Placeholder: in production, download & parse with PyMuPDF / python-docx
-    await message.answer(
-        "Файл получен. К сожалению, автоматический разбор файла ещё в разработке. "
-        "Давайте продолжим интервью вручную — это займёт 5–7 минут."
+async def onboarding_document(message: Message, state: FSMContext, bot: Bot) -> None:
+    processing_msg = await message.answer(
+        "Файл получен. Анализирую резюме с помощью ИИ... Это займёт около 10-15 секунд 🤖"
     )
-    await _start_interview(message, state)
+    await _process_uploaded_document(message, state, bot, processing_msg)
+
+
+async def _process_uploaded_document(message: Message, state: FSMContext, bot: Bot, processing_msg: Message) -> None:
+    document = message.document
+    file_id = document.file_id
+    file_name = document.file_name or "resume"
+    ext = file_name.split(".")[-1].lower()
+    
+    if ext not in ["pdf", "docx"]:
+        await processing_msg.edit_text("Извините, я поддерживаю только форматы PDF и DOCX. Отправьте файл в нужном формате или напишите «нет», чтобы продолжить вручную.")
+        await state.set_state(OnboardingStates.upload_resume_prompt)
+        return
+        
+    try:
+        file = await bot.get_file(file_id)
+        file_path = file.file_path
+        
+        # Download file to a local temporary path
+        local_path = f"/tmp/{file_id}.{ext}"
+        await bot.download_file(file_path, local_path)
+        
+        text = ""
+        if ext == "pdf":
+            doc = fitz.open(local_path)
+            for page in doc:
+                text += page.get_text()
+            doc.close()
+        elif ext == "docx":
+            doc = docx.Document(local_path)
+            for para in doc.paragraphs:
+                text += para.text + "\n"
+                
+        os.remove(local_path)
+        
+        if len(text.strip()) < 50:
+            await processing_msg.edit_text("Не удалось извлечь достаточно текста из файла (возможно, это отсканированная картинка). Давайте продолжим вручную.")
+            await _start_interview(message, state)
+            return
+            
+        from bot.services.ai_service import parse_resume_file
+        parsed_data = await parse_resume_file(text)
+        
+        # Save parsed data to state
+        data = await state.get_data()
+        
+        # Keep existing fields and merge new ones
+        merged_data = {
+            "summary": parsed_data.get("summary", ""),
+            "work_experiences": parsed_data.get("work_experiences", []),
+            "skills": parsed_data.get("skills", []),
+            "education": "", # Simplify for now
+        }
+        
+        # Format education from list of dicts to string
+        ed_list = parsed_data.get("education", [])
+        if ed_list and isinstance(ed_list, list):
+            ed_strs = []
+            for ed in ed_list:
+                ed_strs.append(f"{ed.get('institution', '')} - {ed.get('degree', '')} ({ed.get('year_end', '')})")
+            merged_data["education"] = "\n".join(ed_strs)
+            
+        await state.update_data(parsed_from_file=True, **merged_data)
+        
+        # Check what needs to be filled next
+        we = merged_data.get("work_experiences", [])
+        if not we:
+            await processing_msg.edit_text("Я извлек основные данные, но не нашел подробного опыта работы. Давайте заполним его вместе.")
+            from bot.handlers.interview import ask_summary
+            await state.set_state(InterviewStates.work_experience_company)
+            await message.answer("Укажите название компании (последнее или текущее место работы).")
+            return
+            
+        # Check if achievements are missing in the last job
+        last_job = we[0] if isinstance(we, list) and len(we) > 0 else {}
+        achievements = last_job.get("achievements", [])
+        
+        if not achievements:
+            await processing_msg.edit_text(f"Я прочитал твой опыт в {last_job.get('company', 'компании')}, но там не описаны достижения. Для ATS-систем они очень важны (цифры, факты, рост). Давай добавим их.")
+            await state.update_data(
+                current_company=last_job.get('company', ''),
+                current_role=last_job.get('position', ''),
+                current_dates=f"{last_job.get('start_date', '')} - {last_job.get('end_date', '')}",
+                current_responsibilities=last_job.get('description', '')
+            )
+            await state.set_state(InterviewStates.work_experience_achievements)
+            return
+
+        # Jump to skills if experience is fine
+        if not merged_data.get("skills"):
+            await processing_msg.edit_text("Я извлек ваш опыт работы, но раздел навыков пуст. Давайте заполним навыки.")
+            from bot.handlers.interview import _start_skills_stage
+            await _start_skills_stage(message, state)
+            return
+            
+        # Jump to extras if everything else is fine
+        await processing_msg.edit_text("Супер! Я успешно прочитал твоё резюме. Опыт и навыки заполнены, достижения тоже есть. Давай перейдём к последнему шагу.")
+        await state.set_state(InterviewStates.extras_input)
+        await message.answer(
+            "Последний этап. Укажите дополнительную информацию:\n"
+            "— Желаемый уровень зарплаты\n"
+            "— Формат работы\n"
+            "— Если ничего не нужно, напишите «нет»."
+        )
+
+    except Exception as e:
+        logger.error(f"Error parsing document: {e}")
+        await processing_msg.edit_text(
+            "Произошла ошибка при анализе файла. Давайте продолжим вручную — это займёт 5–7 минут."
+        )
+        await _start_interview(message, state)
 
 
 async def _start_interview(message: Message, state: FSMContext) -> None:

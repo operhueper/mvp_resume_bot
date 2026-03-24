@@ -265,19 +265,36 @@ async def handle_we_achievements(message: Message, state: FSMContext) -> None:
     if not has_numbers and not is_declined and nudges < MAX_ACHIEVEMENT_NUDGES:
         nudges += 1
         await state.update_data(achievement_nudges=nudges)
-
-        if nudges == 1:
-            await message.answer(
-                "Можете назвать конкретную цифру? "
-                "Например: «+30% к продажам», «50 новых клиентов», «сократил время на 2 часа в день»."
-            )
-        else:
-            await state.update_data(current_achievements=text)
-            await message.answer(
-                "Хорошо, запишем как есть. Переходим к подтверждению блока."
-            )
-            await _show_we_block_for_confirmation(message, state)
-        return
+        
+        from bot.services.ai_service import clarify_achievement
+        
+        wait_msg = await message.answer("Анализирую ответ... 🤖")
+        try:
+            ai_question = await clarify_achievement(text, nudges)
+            await wait_msg.delete()
+            if not ai_question:
+                # AI accepted it or gave up, move on
+                await state.update_data(current_achievements=text)
+                await message.answer("Хорошо, запишем как есть. Переходим к подтверждению блока.")
+                await _show_we_block_for_confirmation(message, state)
+                return
+                
+            await message.answer(ai_question)
+            return
+        except Exception as e:
+            logger.error(f"Error AI clarify: {e}")
+            await wait_msg.delete()
+            
+            # Fallback to hardcoded
+            if nudges == 1:
+                await message.answer(
+                    "Не могли бы вы добавить конкретные цифры к этому результату? На сколько процентов/штук/часов вы улучшили показатели?"
+                )
+            else:
+                await state.update_data(current_achievements=text)
+                await message.answer("Хорошо, запишем как есть. Переходим к подтверждению блока.")
+                await _show_we_block_for_confirmation(message, state)
+            return
 
     await state.update_data(current_achievements=text)
     await _show_we_block_for_confirmation(message, state)
