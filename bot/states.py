@@ -13,6 +13,8 @@ class OnboardingStates(StatesGroup):
 
 
 class InterviewStates(StatesGroup):
+    block_selection = State()  # navigation hub: choose which block to edit/fill
+    generation_confirm = State()  # waiting for user to confirm after validation warning
     summary = State()
     work_experience_company = State()
     work_experience_role = State()
@@ -26,8 +28,6 @@ class InterviewStates(StatesGroup):
 
 class ImprovementStates(StatesGroup):
     reviewing_parsed_data = State()
-    improving_work_experience = State()
-    confirm_improved_experience = State()
 
 
 class ResumeStates(StatesGroup):

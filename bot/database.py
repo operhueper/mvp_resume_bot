@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from supabase import create_client, Client
@@ -52,7 +53,7 @@ async def get_or_create_user(telegram_id: int, telegram_username: str | None = N
         if rows:
             await asyncio.to_thread(
                 lambda: db.table("rb_users")
-                .update({"last_active_at": "now()"})
+                .update({"last_active_at": datetime.now(timezone.utc).isoformat()})
                 .eq("id", telegram_id)
                 .execute()
             )
@@ -146,7 +147,7 @@ async def save_candidate_profile(user_id: int, profile_data: dict) -> str:
             profile_id = existing_data["id"]
             await asyncio.to_thread(
                 lambda: db.table("rb_candidate_profiles")
-                .update({**profile_data, "updated_at": "now()"})
+                .update({**profile_data, "updated_at": datetime.now(timezone.utc).isoformat()})
                 .eq("id", profile_id)
                 .execute()
             )
@@ -184,6 +185,20 @@ async def get_candidate_profile(user_id: int) -> dict | None:
 # Work experience
 # ---------------------------------------------------------------------------
 
+async def clear_work_experiences(profile_id: str) -> None:
+    """Delete all work experiences for a profile (before re-inserting)."""
+    db = get_client()
+    try:
+        await asyncio.to_thread(
+            lambda: db.table("rb_work_experiences")
+            .delete()
+            .eq("profile_id", profile_id)
+            .execute()
+        )
+    except Exception as exc:
+        logger.error("clear_work_experiences error: %s", exc)
+
+
 async def save_work_experience(profile_id: str, experience: dict) -> str:
     """Insert a work experience record, return UUID."""
     db = get_client()
@@ -201,6 +216,20 @@ async def save_work_experience(profile_id: str, experience: dict) -> str:
 # ---------------------------------------------------------------------------
 # Skills
 # ---------------------------------------------------------------------------
+
+async def clear_skills(profile_id: str) -> None:
+    """Delete all skills for a profile (before re-inserting)."""
+    db = get_client()
+    try:
+        await asyncio.to_thread(
+            lambda: db.table("rb_skills")
+            .delete()
+            .eq("profile_id", profile_id)
+            .execute()
+        )
+    except Exception as exc:
+        logger.error("clear_skills error: %s", exc)
+
 
 async def save_skill(profile_id: str, name: str, category: str = "hard") -> str:
     """Insert a skill, return UUID."""
@@ -220,6 +249,20 @@ async def save_skill(profile_id: str, name: str, category: str = "hard") -> str:
 # ---------------------------------------------------------------------------
 # Education
 # ---------------------------------------------------------------------------
+
+async def clear_education(profile_id: str) -> None:
+    """Delete all education records for a profile (before re-inserting)."""
+    db = get_client()
+    try:
+        await asyncio.to_thread(
+            lambda: db.table("rb_education")
+            .delete()
+            .eq("profile_id", profile_id)
+            .execute()
+        )
+    except Exception as exc:
+        logger.error("clear_education error: %s", exc)
+
 
 async def save_education(profile_id: str, data: dict) -> str:
     """Insert an education record, return UUID."""
@@ -282,7 +325,7 @@ async def update_resume(resume_id: str, content: str) -> bool:
     try:
         await asyncio.to_thread(
             lambda: db.table("rb_resumes")
-            .update({"content": content, "updated_at": "now()"})
+            .update({"content": content, "updated_at": datetime.now(timezone.utc).isoformat()})
             .eq("id", resume_id)
             .execute()
         )

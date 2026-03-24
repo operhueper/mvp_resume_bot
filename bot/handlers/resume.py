@@ -14,6 +14,7 @@ import logging
 import re
 
 from aiogram import Router, F
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -27,6 +28,14 @@ from bot.states import ResumeStates
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+async def _send_long_message(message: Message, text: str, **kwargs) -> None:
+    """Split text into ≤4000-char chunks; kwargs (e.g. reply_markup) go on the last chunk only."""
+    limit = 4000
+    chunks = [text[i : i + limit] for i in range(0, len(text), limit)]
+    for i, chunk in enumerate(chunks):
+        await message.answer(chunk, **(kwargs if i == len(chunks) - 1 else {}))
 
 # ---------------------------------------------------------------------------
 # Keyboard helpers
@@ -127,7 +136,8 @@ async def handle_viewing_draft(message: Message, state: FSMContext) -> None:
     # Not a recognised command — show the current draft again with action keyboard
     resume_id, content = await _get_current_resume(state)
     if content:
-        await message.answer(
+        await _send_long_message(
+            message,
             f"Ваше текущее резюме:\n\n{content}",
             reply_markup=_resume_action_keyboard(resume_id),
         )
@@ -143,19 +153,19 @@ async def handle_viewing_draft(message: Message, state: FSMContext) -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(F.data.startswith("resume_shorter:"))
+@router.callback_query(F.data.startswith("resume_shorter:"), StateFilter(ResumeStates.viewing_draft))
 async def cb_resume_shorter(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await _apply_edit_command(callback.message, state, "shorter")
 
 
-@router.callback_query(F.data.startswith("resume_formal:"))
+@router.callback_query(F.data.startswith("resume_formal:"), StateFilter(ResumeStates.viewing_draft))
 async def cb_resume_formal(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await _apply_edit_command(callback.message, state, "formal")
 
 
-@router.callback_query(F.data.startswith("resume_rewrite:"))
+@router.callback_query(F.data.startswith("resume_rewrite:"), StateFilter(ResumeStates.viewing_draft))
 async def cb_resume_rewrite(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(ResumeStates.editing)
@@ -165,7 +175,7 @@ async def cb_resume_rewrite(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.callback_query(F.data.startswith("resume_add_skill:"))
+@router.callback_query(F.data.startswith("resume_add_skill:"), StateFilter(ResumeStates.viewing_draft))
 async def cb_resume_add_skill(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(ResumeStates.editing)
@@ -180,6 +190,9 @@ async def cb_resume_add_skill(callback: CallbackQuery, state: FSMContext) -> Non
 # ---------------------------------------------------------------------------
 
 
+_PERSISTENT_BUTTONS = {"📄 моё резюме", "❓ помощь", "🔄 начать заново", "🗑 удалить профиль"}
+
+
 @router.message(ResumeStates.editing)
 async def handle_editing(message: Message, state: FSMContext) -> None:
     from bot.handlers.start import main_keyboard
@@ -187,6 +200,10 @@ async def handle_editing(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if not text:
         await message.answer("Пожалуйста, введите текст.")
+        return
+
+    # Ignore persistent keyboard button presses — they are handled by start.py
+    if text.lower() in _PERSISTENT_BUTTONS:
         return
 
     data = await state.get_data()
@@ -217,7 +234,8 @@ async def handle_editing(message: Message, state: FSMContext) -> None:
         await db.log_event(user_id, "resume_edited", {"command": pending_edit})
 
     await state.set_state(ResumeStates.viewing_draft)
-    await message.answer(
+    await _send_long_message(
+        message,
         f"Обновлённое резюме:\n\n{new_content}",
         reply_markup=_resume_action_keyboard(resume_id),
     )
@@ -277,7 +295,8 @@ async def _apply_edit_command(message: Message, state: FSMContext, command: str)
         await db.log_event(user_id, "resume_edited", {"command": command})
 
     await state.set_state(ResumeStates.viewing_draft)
-    await message.answer(
+    await _send_long_message(
+        message,
         f"Обновлённое резюме:\n\n{new_content}",
         reply_markup=_resume_action_keyboard(resume_id),
     )
@@ -288,7 +307,7 @@ async def _apply_edit_command(message: Message, state: FSMContext, command: str)
 # ---------------------------------------------------------------------------
 
 
-@router.callback_query(F.data == "resume_new_position")
+@router.callback_query(F.data == "resume_new_position", StateFilter(ResumeStates.viewing_draft))
 async def cb_resume_new_position(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(ResumeStates.selecting_position_title)
@@ -302,6 +321,10 @@ async def handle_new_position_title(message: Message, state: FSMContext) -> None
     position = (message.text or "").strip()
     if not position:
         await message.answer("Введите название позиции.")
+        return
+
+    # Ignore persistent keyboard button presses
+    if position.lower() in _PERSISTENT_BUTTONS:
         return
 
     data = await state.get_data()
@@ -335,7 +358,8 @@ async def handle_new_position_title(message: Message, state: FSMContext) -> None
         resume_id = None
 
     await state.set_state(ResumeStates.viewing_draft)
-    await message.answer(
+    await _send_long_message(
+        message,
         f"Резюме для позиции «{position}»:\n\n{new_content}",
         reply_markup=_resume_action_keyboard(resume_id) if resume_id else None,
     )

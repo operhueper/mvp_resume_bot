@@ -6,7 +6,7 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.config import settings
 from bot.handlers import start, interview, resume
@@ -54,12 +54,26 @@ async def fallback_no_state(message: Message, state: FSMContext) -> None:
             ),
         )
     else:
-        from bot.handlers.start import _choose_path_keyboard
-        await message.answer(
-            "Привет! Я помогу создать профессиональное резюме для hh.ru.\n\n"
-            "Нажмите /start, чтобы начать, или выберите опцию:",
-            reply_markup=_choose_path_keyboard(),
-        )
+        # Check if user has an existing profile (e.g. after bot restart)
+        from bot.handlers.start import main_keyboard, _resume_actions_keyboard
+        profile = await db.get_candidate_profile(user_id)
+        if profile:
+            await message.answer(
+                "С возвращением! Ваш профиль уже существует.\n"
+                "Выберите действие с помощью кнопок меню.",
+                reply_markup=main_keyboard(),
+            )
+            await message.answer(
+                "Или выберите из дополнительных опций:",
+                reply_markup=_resume_actions_keyboard(),
+            )
+        else:
+            from bot.handlers.start import _choose_path_keyboard
+            await message.answer(
+                "Привет! Я помогу создать профессиональное резюме для hh.ru.\n\n"
+                "Нажмите /start, чтобы начать, или выберите опцию:",
+                reply_markup=_choose_path_keyboard(),
+            )
 
 
 async def main() -> None:
@@ -72,6 +86,13 @@ async def main() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
     dp = Dispatcher(storage=MemoryStorage())
+
+    # Register bot commands (shows Меню button in Telegram)
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Начать / главное меню"),
+        BotCommand(command="back", description="Назад — выбор раздела резюме"),
+        BotCommand(command="save", description="Сохранить текущий прогресс"),
+    ])
 
     # Register routers in priority order — fallback_router LAST
     dp.include_router(start.router)

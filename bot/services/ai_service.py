@@ -316,8 +316,8 @@ Your task: write a complete, ATS-optimised resume for the given position.
 STRICT QUALITY RULES — follow all of them without exception:
 
 STRUCTURE (in this exact order):
-1. О СЕБЕ — 3 to 5 sentences. Hook the hiring manager. Mention years of experience,
-   core expertise, and 1-2 key achievements with numbers.
+1. О СЕБЕ — 3 to 5 sentences. Hook the hiring manager. Mention years of experience
+   and core expertise. Only include achievements with numbers if the candidate explicitly provided them.
 2. ОПЫТ РАБОТЫ — reverse-chronological. For each role:
    - Header: Company name | Position | Date range (MM.YYYY – MM.YYYY or "по настоящее время")
    - 3 to 6 bullet points per role
@@ -325,15 +325,16 @@ STRUCTURE (in this exact order):
 4. ОБРАЗОВАНИЕ — institution, degree, year
 {gender_note}
 BULLET POINT RULES (most important):
-- Every bullet: Action verb (past tense Russian) + Task/scope + Measurable result + Tools used
-- TARGET: ≥70% of bullets must contain a specific number, %, time period, or money amount
+- Every bullet: Action verb (past tense Russian) + Task/scope + Result (with metric IF the candidate provided one)
+- ONLY use numbers, percentages, and metrics that were EXPLICITLY stated by the candidate in their input.
+  DO NOT invent or estimate any figures. If no metric was given, describe the scope or outcome in words.
 - Approved strong action verbs: Увеличил, Сократил, Разработал, Внедрил, Оптимизировал,
   Запустил, Руководил, Автоматизировал, Реструктурировал, Обучил, Привлёк, Снизил,
   Ускорил, Выстроил, Масштабировал, Согласовал, Закрыл, Провёл, Настроил, Интегрировал
 - FORBIDDEN vague bullets: "Занимался различными задачами", "Помогал команде",
   "Выполнял поручения", "Участвовал в проектах", "Работал над задачами"
-- If no exact metric is available, use relative improvement ("на 30%+") or scope
-  ("для команды из 15 человек", "на рынке 5 регионов")
+- FORBIDDEN: inventing metrics not present in the input ("увеличил на 25%", "сократил на 15%"
+  unless the candidate explicitly stated these numbers)
 
 LENGTH & FORMAT:
 - Target ~800-1000 words total (≈1 A4 page)
@@ -360,7 +361,6 @@ async def generate_resume(profile_data: dict, position_title: str, gender: str =
         f"Desired position: {position_title}\n\n"
         f"Candidate profile data:\n{json.dumps(profile_data, ensure_ascii=False, indent=2)}\n\n"
         "Write a complete resume following all quality rules. "
-        "Make sure ≥70% of experience bullets contain specific metrics or numbers. "
         "Return only the resume text, no extra commentary."
     )
     return await _chat(
@@ -501,3 +501,117 @@ async def adapt_resume_for_position(current_content: str, position: str) -> str:
         "расставь акценты в опыте и навыках так, чтобы они соответствовали этой роли."
     )
     return await improve_resume(current_content, instruction)
+
+
+async def validate_resume_data(interview_data: dict) -> list[str]:
+    """Check if interview data contains coherent, real-looking professional content.
+
+    Returns a list of human-readable warnings (in Russian). Empty list means data looks valid.
+    Uses gpt-4o-mini for speed/cost.
+    """
+    import json as _json
+
+    check_data = {
+        "summary": interview_data.get("summary", ""),
+        "work_experiences": [
+            {
+                "company": j.get("company", ""),
+                "role": j.get("role", ""),
+                "responsibilities": j.get("responsibilities", ""),
+                "achievements": j.get("achievements", ""),
+            }
+            for j in (interview_data.get("work_experiences") or [])
+        ],
+        "skills": interview_data.get("skills", []),
+        "education": interview_data.get("education", ""),
+    }
+
+    raw = await _chat(
+        model="gpt-4o-mini",
+        system=(
+            "Ты проверяешь данные резюме на достоверность и осмысленность. "
+            "Пользователь заполнял поля, и нужно определить, содержат ли они реальную профессиональную информацию, "
+            "а не тестовый мусор, бессмыслицу или шуточные ответы.\n\n"
+            "Проверь:\n"
+            "1. company — выглядит ли название компании как реальное (не 'asdf', 'тест', 'компания', 'хз' и т.п.)?\n"
+            "2. role — выглядит ли должность реально?\n"
+            "3. responsibilities — описывают ли реальные рабочие обязанности, а не бессмыслицу или шутки?\n"
+            "4. summary — связный профессиональный текст, а не случайный набор слов?\n\n"
+            "Верни ТОЛЬКО валидный JSON-объект с одним ключом 'issues' — массив строк на русском языке. "
+            "Каждая строка — конкретная проблема. Если проблем нет — верни пустой массив. "
+            "Пример: {\"issues\": [\"Название компании выглядит ненастоящим: 'протирал штаны'\", "
+            "\"Обязанности не описывают реальную работу\"]}"
+        ),
+        user=_json.dumps(check_data, ensure_ascii=False),
+        temperature=0.1,
+        max_tokens=400,
+    )
+    result = _parse_json_dict(raw)
+    issues = result.get("issues", [])
+    return [str(i) for i in issues] if isinstance(issues, list) else []
+
+
+async def parse_skills_from_text(text: str) -> list[str]:
+    """Extract individual skills from free-form text using AI.
+
+    Handles comma-separated lists, numbered lists, bullet points,
+    plain sentences, and any other format the user might paste.
+    Falls back to regex split if AI fails.
+    """
+    raw = await _chat(
+        model="gpt-4o-mini",
+        system=(
+            "Ты помогаешь составлять резюме. Пользователь вводит свои навыки в произвольном формате. "
+            "Извлеки из текста список отдельных навыков — программы, технологии, методологии, инструменты, "
+            "профессиональные компетенции. Каждый элемент списка — отдельный навык (не предложение). "
+            "Верни ТОЛЬКО валидный JSON-массив строк, без лишнего текста и без markdown-обёртки.\n"
+            "Примеры:\n"
+            "Вход: 'Python, SQL, Excel' → [\"Python\", \"SQL\", \"Excel\"]\n"
+            "Вход: '1. Python\\n2. SQL\\n3. Excel' → [\"Python\", \"SQL\", \"Excel\"]\n"
+            "Вход: 'Знаю Python и SQL, умею в Excel и Jira' → [\"Python\", \"SQL\", \"Excel\", \"Jira\"]"
+        ),
+        user=text,
+        temperature=0.1,
+        max_tokens=400,
+    )
+    skills = _parse_json_list(raw)
+    if not skills:
+        import re
+        parts = re.split(r"[,;\n•\-–—]+", text)
+        skills = [p.strip() for p in parts if p.strip() and len(p.strip()) < 60]
+    return skills
+
+
+async def generate_summary_help(
+    position: str,
+    name: str = "",
+    work_experiences: list | None = None,
+) -> str:
+    """Generate a draft 'О себе' section based on the user's profile data.
+
+    Leaves [PLACEHOLDER] markers for numbers and specifics the user should fill in.
+    """
+    context_parts = [f"Желаемая позиция: {position}"]
+    if name:
+        context_parts.append(f"Имя: {name}")
+    if work_experiences:
+        last_job = work_experiences[0]
+        role = last_job.get("role", "") or last_job.get("position", "")
+        company = last_job.get("company", "")
+        if role or company:
+            context_parts.append(f"Последнее место работы: {role} в {company}")
+    context = "\n".join(context_parts)
+
+    return await _chat(
+        model="gpt-4o-mini",
+        system=(
+            "Ты помогаешь составлять раздел «О себе» для резюме на hh.ru. "
+            "Напиши черновик в 3–4 предложениях. Тон: профессиональный, конкретный. "
+            "Там, где нужны конкретные цифры или факты — оставь метку [УКАЖИТЕ ЦИФРУ/ФАКТ]. "
+            "Не используй местоимения «я», «мой». Пиши на русском. "
+            "Верни только текст раздела, без заголовков и пояснений."
+        ),
+        user=f"Данные кандидата:\n{context}\n\nНапиши черновик раздела «О себе»:",
+        temperature=0.6,
+        max_tokens=250,
+    )

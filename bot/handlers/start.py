@@ -4,11 +4,13 @@
 
 from __future__ import annotations
 
+import html
 import logging
 
 from aiogram import Router, F, Bot
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import default_state
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -23,7 +25,7 @@ import fitz
 import docx
 
 import bot.database as db
-from bot.states import OnboardingStates, InterviewStates, ResumeStates
+from bot.states import OnboardingStates, InterviewStates, ImprovementStates, ResumeStates
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -93,6 +95,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     # If the user already has a profile, show the main menu
     profile = await db.get_candidate_profile(user_id)
     if profile:
+        await state.clear()
         await state.update_data(user_id=user_id)
         await message.answer(
             "С возвращением! Ваш профиль уже существует.\n"
@@ -125,14 +128,23 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 # Onboarding: path selection
 # ---------------------------------------------------------------------------
 
-@router.callback_query(F.data == "path_know")
+@router.message(OnboardingStates.choosing_path)
+async def onboarding_choosing_path_text(message: Message, state: FSMContext) -> None:
+    """User typed text instead of pressing a button — re-show the keyboard."""
+    await message.answer(
+        "Пожалуйста, выберите один из вариантов ниже:",
+        reply_markup=_choose_path_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "path_know", StateFilter(OnboardingStates.choosing_path, default_state))
 async def onboarding_path_know(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(OnboardingStates.waiting_desired_position)
     await callback.message.answer("Отлично! На какую позицию Вы ищете работу? (введите название текстом)")
 
 
-@router.callback_query(F.data == "path_help")
+@router.callback_query(F.data == "path_help", StateFilter(OnboardingStates.choosing_path, default_state))
 async def onboarding_path_help(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(OnboardingStates.coaching_questions)
@@ -184,8 +196,7 @@ async def onboarding_handle_coaching(message: Message, state: FSMContext) -> Non
             await wait_msg.delete()
         except Exception:
             pass
-        q_text = locals().get('query', 'неизвестно')
-        await message.answer(f"Извините, произошёл сбой при обращении к рынку (запрос: {q_text}, ошибка: {e}). Напишите должность вручную:")
+        await message.answer("Извините, произошёл сбой при анализе рынка. Напишите желаемую должность вручную:")
         await state.set_state(OnboardingStates.waiting_desired_position)
 
 
@@ -223,6 +234,17 @@ async def onboarding_city(message: Message, state: FSMContext) -> None:
     city = message.text.strip() if message.text else ""
     if not city:
         await message.answer("Пожалуйста, введите название города.")
+        return
+
+    # Strip everything after comma or question mark — likely noise
+    for sep in (",", "?", "!"):
+        if sep in city:
+            city = city.split(sep)[0].strip()
+
+    if len(city) > 60 or len(city.split()) > 4:
+        await message.answer(
+            "Похоже, это не название города. Введите только город, например: «Москва» или «Санкт-Петербург»."
+        )
         return
 
     await state.update_data(city=city)
@@ -267,8 +289,24 @@ async def onboarding_upload_prompt(message: Message, state: FSMContext, bot: Bot
         await _process_uploaded_document(message, state, bot, processing_msg)
         return
 
-    # User skipped upload
-    await _start_interview(message, state)
+    _SKIP_WORDS = {"нет", "no", "пропустить", "без файла", "нету", "не буду", "не надо"}
+    if text in _SKIP_WORDS:
+        await _start_interview(message, state)
+        return
+
+    # User typed something that's not a file and not a skip command
+    await message.answer(
+        "Чтобы прикрепить файл — нажмите скрепку 📎 и выберите PDF или DOCX.\n"
+        "Если резюме нет — напишите «нет», и мы начнём с нуля."
+    )
+
+
+@router.message(OnboardingStates.processing_upload, F.text)
+async def onboarding_processing_text(message: Message, state: FSMContext) -> None:
+    """User typed text while file is being processed — tell them to wait."""
+    await message.answer(
+        "Файл обрабатывается. Подождите немного или отправьте другой файл (PDF / DOCX)."
+    )
 
 
 @router.message(OnboardingStates.processing_upload, F.document)
@@ -299,17 +337,19 @@ async def _process_uploaded_document(message: Message, state: FSMContext, bot: B
         await bot.download_file(file_path, local_path)
 
         text = ""
-        if ext == "pdf":
-            doc = fitz.open(local_path)
-            for page in doc:
-                text += page.get_text()
-            doc.close()
-        elif ext == "docx":
-            doc = docx.Document(local_path)
-            for para in doc.paragraphs:
-                text += para.text + "\n"
-
-        os.remove(local_path)
+        try:
+            if ext == "pdf":
+                doc = fitz.open(local_path)
+                for page in doc:
+                    text += page.get_text()
+                doc.close()
+            elif ext == "docx":
+                doc = docx.Document(local_path)
+                for para in doc.paragraphs:
+                    text += para.text + "\n"
+        finally:
+            if os.path.exists(local_path):
+                os.remove(local_path)
 
         if len(text.strip()) < 50:
             await processing_msg.edit_text("Не удалось извлечь достаточно текста из файла (возможно, это отсканированная картинка). Давайте продолжим вручную.")
@@ -320,9 +360,27 @@ async def _process_uploaded_document(message: Message, state: FSMContext, bot: B
         parsed_data = await parse_resume_file(text)
 
         # Keep existing fields and merge new ones
+        # Normalize work experience field names to match interview flow schema
+        raw_jobs = parsed_data.get("work_experiences", [])
+        normalized_jobs = []
+        for job in raw_jobs:
+            normalized_jobs.append({
+                "company": job.get("company", ""),
+                "role": job.get("position", job.get("role", "")),
+                "dates": job.get("dates", ""),
+                "responsibilities": job.get("description", job.get("responsibilities", "")),
+                "achievements": job.get("achievements", ""),
+            })
+            # Build dates from start_date/end_date if "dates" is empty
+            if not normalized_jobs[-1]["dates"]:
+                start = job.get("start_date", "")
+                end = job.get("end_date", "")
+                if start or end:
+                    normalized_jobs[-1]["dates"] = f"{start} — {end}".strip(" —")
+
         merged_data = {
             "summary": parsed_data.get("summary", ""),
-            "work_experiences": parsed_data.get("work_experiences", []),
+            "work_experiences": normalized_jobs,
             "skills": parsed_data.get("skills", []),
             "education": "",
         }
@@ -336,6 +394,13 @@ async def _process_uploaded_document(message: Message, state: FSMContext, bot: B
             merged_data["education"] = "\n".join(ed_strs)
 
         await state.update_data(parsed_from_file=True, **merged_data)
+
+        # Persist state so parsed data survives bot restarts
+        data = await state.get_data()
+        uid = data.get("user_id")
+        if uid:
+            from bot.handlers.interview import _persist_state
+            await _persist_state(state, uid)
 
         await processing_msg.edit_text("Я извлёк основные данные. Сейчас проведу быстрый аудит Вашего резюме на соответствие требованиям рынка (ATS)... 🤖")
         from bot.services.ai_service import evaluate_parsed_resume
@@ -359,49 +424,31 @@ async def _process_uploaded_document(message: Message, state: FSMContext, bot: B
         await _start_interview(message, state)
 
 
-@router.callback_query(F.data == "start_improving")
+@router.callback_query(F.data == "start_improving", StateFilter(ImprovementStates.reviewing_parsed_data))
 async def cb_start_improving(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    data = await state.get_data()
-    we = data.get("work_experiences", [])
-
-    if we:
-        last_job = we[0]
-        await state.update_data(
-            current_company=last_job.get("company", ""),
-            current_role=last_job.get("position", ""),
-            current_dates=f"{last_job.get('start_date', '')} - {last_job.get('end_date', '')}",
-            current_responsibilities=last_job.get("description", "")
-        )
-        from bot.states import InterviewStates
-        await state.set_state(InterviewStates.work_experience_achievements)
-        await callback.message.answer(
-            f"Начнём с последнего места работы: {last_job.get('company', 'компания')}.\n"
-            "Здесь не хватает измеримых достижений.\n"
-            "Какими результатами Вы больше всего гордитесь на этой позиции? (На сколько процентов выросли продажи, сколько времени сэкономили и т.д.)"
-        )
-    else:
-        from bot.handlers.interview import _start_skills_stage
-        await callback.message.answer("Опыт работы не найден, давайте перейдём к навыкам.")
-        await _start_skills_stage(callback.message, state)
+    from bot.handlers.interview import show_block_selection
+    await callback.message.answer(
+        "Данные из Вашего резюме загружены. Проверьте каждый раздел и при необходимости отредактируйте."
+    )
+    await show_block_selection(callback.message, state)
 
 
-@router.callback_query(F.data == "skip_improving")
+@router.callback_query(F.data == "skip_improving", StateFilter(ImprovementStates.reviewing_parsed_data))
 async def cb_skip_improving(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    from bot.states import InterviewStates
-    await state.set_state(InterviewStates.extras_input)
-    await callback.message.answer(
-        "Последний этап. Укажите дополнительную информацию:\n"
-        "— Желаемый уровень зарплаты\n"
-        "— Формат работы\n"
-        "— Если ничего не нужно, напишите «нет»."
-    )
+    from bot.handlers.interview import show_block_selection
+    await show_block_selection(callback.message, state)
 
 
 async def _start_interview(message: Message, state: FSMContext) -> None:
     """Transition to the first interview state."""
-    from bot.handlers.interview import ask_summary
+    from bot.handlers.interview import ask_summary, _persist_state
+    # Persist onboarding data so it survives bot restarts before first interview step
+    data = await state.get_data()
+    user_id = data.get("user_id")
+    if user_id:
+        await _persist_state(state, user_id)
     await state.set_state(InterviewStates.summary)
     await ask_summary(message, state)
 
@@ -410,7 +457,7 @@ async def _start_interview(message: Message, state: FSMContext) -> None:
 # Main menu callbacks (inline keyboard from profile page)
 # ---------------------------------------------------------------------------
 
-@router.callback_query(F.data == "menu_continue_interview")
+@router.callback_query(F.data == "menu_continue_interview", StateFilter(default_state, None))
 async def cb_continue_interview(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     data = await state.get_data()
@@ -423,10 +470,9 @@ async def cb_continue_interview(callback: CallbackQuery, state: FSMContext) -> N
     saved = await db.get_interview_state(user_id)
     if saved:
         await state.update_data(**saved)
-    await state.set_state(InterviewStates.summary)
 
-    from bot.handlers.interview import ask_summary
-    await ask_summary(callback.message, state)
+    from bot.handlers.interview import show_block_selection
+    await show_block_selection(callback.message, state)
 
 
 @router.callback_query(F.data == "menu_delete_profile")
@@ -474,9 +520,9 @@ async def cb_cancel_delete(callback: CallbackQuery, state: FSMContext) -> None:
 # Auto-continue inline buttons (for fallback handler in main.py)
 # ---------------------------------------------------------------------------
 
-@router.callback_query(F.data == "autocontinue_resume")
+@router.callback_query(F.data == "autocontinue_resume", StateFilter(default_state))
 async def cb_autocontinue_resume(callback: CallbackQuery, state: FSMContext) -> None:
-    """Restore FSM state from DB and continue interview."""
+    """Restore FSM state from DB and show block selection."""
     await callback.answer()
     data = await state.get_data()
     user_id = data.get("user_id")
@@ -489,12 +535,11 @@ async def cb_autocontinue_resume(callback: CallbackQuery, state: FSMContext) -> 
     if saved:
         await state.update_data(**saved)
 
-    await state.set_state(InterviewStates.summary)
-    from bot.handlers.interview import ask_summary
-    await ask_summary(callback.message, state)
+    from bot.handlers.interview import show_block_selection
+    await show_block_selection(callback.message, state)
 
 
-@router.callback_query(F.data == "autocontinue_restart")
+@router.callback_query(F.data == "autocontinue_restart", StateFilter(default_state))
 async def cb_autocontinue_restart(callback: CallbackQuery, state: FSMContext) -> None:
     """Restart from scratch."""
     await callback.answer()
@@ -539,11 +584,15 @@ async def btn_my_resume(message: Message, state: FSMContext) -> None:
     latest = resumes[0]
     content = latest.get("content", "")
     title = latest.get("title", "Резюме")
-    await message.answer(
-        f"<b>{title}</b>\n\n{content}",
-        parse_mode="HTML",
-        reply_markup=main_keyboard(),
-    )
+    full_text = f"<b>{html.escape(title)}</b>\n\n{html.escape(content)}"
+    limit = 4000
+    chunks = [full_text[i : i + limit] for i in range(0, len(full_text), limit)]
+    for i, chunk in enumerate(chunks):
+        await message.answer(
+            chunk,
+            parse_mode="HTML",
+            reply_markup=main_keyboard() if i == len(chunks) - 1 else None,
+        )
 
 
 @router.message(F.text == "❓ Помощь")
@@ -573,6 +622,8 @@ async def btn_restart(message: Message, state: FSMContext) -> None:
 
     profile = await db.get_candidate_profile(user_id)
     if profile:
+        await state.clear()
+        await state.update_data(user_id=user_id)
         await message.answer(
             "С возвращением! Ваш профиль уже существует.\n"
             "Выберите действие с помощью кнопок меню.",

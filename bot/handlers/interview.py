@@ -22,6 +22,7 @@ import logging
 from typing import Any
 
 from aiogram import Router, F
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -35,6 +36,18 @@ from bot.states import InterviewStates, ResumeStates
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+# ---------------------------------------------------------------------------
+# Utility: send long text in ≤4000-char chunks (Telegram limit is 4096)
+# ---------------------------------------------------------------------------
+
+async def _send_long_message(message: Message, text: str, **kwargs) -> None:
+    """Split text into ≤4000-char chunks; kwargs (e.g. reply_markup) go on the last chunk only."""
+    limit = 4000
+    chunks = [text[i : i + limit] for i in range(0, len(text), limit)]
+    for i, chunk in enumerate(chunks):
+        await message.answer(chunk, **(kwargs if i == len(chunks) - 1 else {}))
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -160,15 +173,214 @@ def _stage_label(stage_num: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Block selection — navigation hub
+# ---------------------------------------------------------------------------
+
+_BLOCK_LABELS = {
+    "summary": "О себе",
+    "work_exp": "Опыт работы",
+    "skills": "Навыки",
+    "education": "Образование",
+    "extras": "Доп. информация",
+}
+
+_REQUIRED_BLOCKS = {"summary", "work_exp", "skills"}
+
+
+async def show_block_selection(message: Message, state: FSMContext) -> None:
+    """Show the block navigation hub: which sections are filled, which are missing."""
+    data = await state.get_data()
+    await state.set_state(InterviewStates.block_selection)
+
+    _empty_values = {"нет", "no", ""}
+
+    filled = {
+        "summary": bool(data.get("summary")),
+        "work_exp": bool(data.get("work_experiences")),
+        "skills": bool(data.get("skills")),
+        "education": bool(data.get("education")) and data.get("education", "").strip().lower() not in _empty_values,
+        "extras": bool(data.get("extras")) and data.get("extras", "").strip().lower() not in _empty_values,
+    }
+
+    lines = []
+    validation_issues = data.get("_validation_issues", [])
+    if validation_issues:
+        issues_text = "\n".join(f"⚠️ {issue}" for issue in validation_issues)
+        lines.append(f"Замечания к данным:\n{issues_text}\n")
+
+    lines.append("Ваш прогресс по разделам:\n")
+    keyboard: list[list[InlineKeyboardButton]] = []
+
+    for key, label in _BLOCK_LABELS.items():
+        icon = "✅" if filled[key] else "➕"
+        lines.append(f"{icon} {label}")
+        if key == "work_exp" and filled[key]:
+            btn_label = f"➕ Добавить ещё: {label}"
+        else:
+            btn_label = f"{'✏️ Изменить' if filled[key] else '➕ Добавить'}: {label}"
+        keyboard.append([InlineKeyboardButton(text=btn_label, callback_data=f"block_sel_{key}")])
+
+    required_done = all(filled[k] for k in _REQUIRED_BLOCKS)
+    if required_done:
+        keyboard.append([InlineKeyboardButton(text="▶️ Создать резюме", callback_data="block_sel_generate")])
+
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+    )
+
+
+# ---------------------------------------------------------------------------
+# /back and /save commands (available during interview via Telegram menu)
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("back"), StateFilter(InterviewStates))
+async def cmd_back(message: Message, state: FSMContext) -> None:
+    """Return to the block selection hub from any interview state."""
+    await show_block_selection(message, state)
+
+
+@router.message(Command("save"), StateFilter(InterviewStates))
+async def cmd_save(message: Message, state: FSMContext) -> None:
+    """Force-persist current interview state to DB."""
+    data = await state.get_data()
+    user_id = data.get("user_id")
+    if user_id:
+        try:
+            await _persist_state(state, user_id)
+            await message.answer("✅ Прогресс сохранён. Вы можете вернуться в любой момент.")
+        except Exception as exc:
+            logger.error("Could not save state: %s", exc)
+            await message.answer("Не удалось сохранить прогресс. Попробуйте ещё раз.")
+    else:
+        await message.answer("Нет данных для сохранения. Начните с /start.")
+
+
+# ---------------------------------------------------------------------------
+# Block selection callbacks
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data == "block_sel_summary", StateFilter(InterviewStates.block_selection))
+async def cb_block_sel_summary(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    existing = data.get("summary", "")
+    await state.update_data(_skip_validation=False, _validation_issues=[])
+    await state.set_state(InterviewStates.summary)
+    if existing:
+        await callback.message.answer(
+            f"Текущий раздел «О себе»:\n\n{existing}\n\n"
+            "Напишите новый текст, чтобы заменить его, или «помощь» — и ИИ составит черновик:"
+        )
+    else:
+        await ask_summary(callback.message, state)
+
+
+@router.callback_query(F.data == "block_sel_work_exp", StateFilter(InterviewStates.block_selection))
+async def cb_block_sel_work_exp(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    existing_jobs = data.get("work_experiences", [])
+    await state.update_data(_skip_validation=False, _validation_issues=[])
+    await state.set_state(InterviewStates.work_experience_company)
+    if existing_jobs:
+        companies = ", ".join(j.get("company", "?") for j in existing_jobs)
+        await callback.message.answer(
+            f"Уже добавлены: {companies}.\n\nВведите название следующей компании, чтобы добавить новое место работы:"
+        )
+    else:
+        await callback.message.answer(
+            f"{_stage_label(2)}\n\nНачнём с опыта работы. Укажите название компании (последнее или текущее место работы)."
+        )
+
+
+@router.callback_query(F.data == "block_sel_skills", StateFilter(InterviewStates.block_selection))
+async def cb_block_sel_skills(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    existing = data.get("skills", [])
+    await state.update_data(_skills_append_mode=bool(existing), _skip_validation=False, _validation_issues=[])
+    await state.set_state(InterviewStates.skills_input)
+    if existing:
+        await callback.message.answer(
+            f"Текущие навыки: {', '.join(existing)}\n\n"
+            "Введите дополнительные навыки в любом формате — они добавятся к существующим:"
+        )
+    else:
+        await _start_skills_stage(callback.message, state)
+
+
+@router.callback_query(F.data == "block_sel_education", StateFilter(InterviewStates.block_selection))
+async def cb_block_sel_education(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    existing = data.get("education", "")
+    await state.update_data(_skip_validation=False, _validation_issues=[])
+    await state.set_state(InterviewStates.education_input)
+    if existing:
+        await callback.message.answer(
+            f"Текущее образование:\n{existing}\n\nВведите новый текст, чтобы обновить раздел:"
+        )
+    else:
+        await callback.message.answer(
+            f"{_stage_label(5)}\n\nУкажите Ваше образование: учебное заведение, специальность и год окончания."
+        )
+
+
+@router.callback_query(F.data == "block_sel_extras", StateFilter(InterviewStates.block_selection))
+async def cb_block_sel_extras(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    existing = data.get("extras", "")
+    await state.update_data(_skip_validation=False, _validation_issues=[])
+    await state.set_state(InterviewStates.extras_input)
+    if existing:
+        await callback.message.answer(
+            f"Текущие доп. данные:\n{existing}\n\nВведите новый текст, чтобы обновить раздел:"
+        )
+    else:
+        await callback.message.answer(
+            f"{_stage_label(6)}\n\nУкажите дополнительную информацию:\n"
+            "— Желаемый уровень зарплаты\n"
+            "— Предпочтения по формату работы\n"
+            "— Готовность к командировкам\n\n"
+            "Если не актуально — напишите «нет»."
+        )
+
+
+@router.callback_query(F.data == "block_sel_generate", StateFilter(InterviewStates.block_selection))
+async def cb_block_sel_generate(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await callback.message.answer("Формирую резюме — это займёт несколько секунд...")
+    await _generate_resume(callback.message, state)
+
+
+@router.message(InterviewStates.block_selection)
+async def handle_block_selection_text(message: Message, state: FSMContext) -> None:
+    """If user types anything in block selection state, re-show the menu."""
+    await show_block_selection(message, state)
+
+
+# ---------------------------------------------------------------------------
 # Off-topic guard
 # ---------------------------------------------------------------------------
 
 
 def _is_off_topic(text: str) -> bool:
-    """Heuristic: if the message is very short and looks like a question or random text."""
+    """Heuristic: only flag short messages that are entirely off-topic greetings/questions."""
     text = text.strip().lower()
-    off_topic_starters = ("кто ты", "что ты", "погода", "привет", "как дела", "анекдот")
-    return any(text.startswith(s) for s in off_topic_starters)
+    # Only treat short messages (< 8 words) as off-topic to avoid false positives
+    # on legitimate interview answers containing these substrings
+    if len(text.split()) > 7:
+        return False
+    import re
+    off_topic_patterns = (
+        r"^привет[!.]?$", r"^здравствуй", r"^как дела", r"^кто ты", r"^что ты умеешь",
+        r"^расскажи анекдот", r"^какая погода",
+    )
+    return any(re.search(p, text) for p in off_topic_patterns)
 
 
 async def _redirect_off_topic(message: Message, state: FSMContext, stage_num: int) -> None:
@@ -183,11 +395,14 @@ async def _redirect_off_topic(message: Message, state: FSMContext, stage_num: in
 # ---------------------------------------------------------------------------
 
 
-async def _persist_state(state: FSMContext, user_id: str) -> None:
+async def _persist_state(state: FSMContext, user_id: int) -> None:
     """Dump current FSM data to DB for recovery across bot restarts."""
     data = await state.get_data()
+    # Filter out transient internal keys (prefixed with _) to avoid
+    # persisting stale flags like _skip_validation, _pending_*, etc.
+    clean = {k: v for k, v in data.items() if not k.startswith("_")}
     try:
-        await db.save_interview_state(user_id, data)
+        await db.save_interview_state(user_id, clean)
     except Exception as exc:
         logger.warning("Could not persist interview state: %s", exc)
 
@@ -218,7 +433,29 @@ async def handle_summary(message: Message, state: FSMContext) -> None:
         return
 
     if _is_help_request(text):
-        await message.answer(_HELP_EXAMPLES["summary"])
+        data = await state.get_data()
+        wait_msg = await message.answer("Составляю черновик «О себе» на основе Вашего профиля... 🤖")
+        try:
+            from bot.services.ai_service import generate_summary_help
+            draft = await generate_summary_help(
+                position=data.get("desired_position", ""),
+                name=data.get("full_name", ""),
+                work_experiences=data.get("work_experiences"),
+            )
+            await wait_msg.delete()
+            await state.update_data(_ai_summary_draft=draft)
+            await message.answer(
+                f"Вот черновик «О себе»:\n\n{draft}\n\n"
+                "Замените [УКАЖИТЕ ЦИФРУ/ФАКТ] на реальные данные и выберите действие:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="✅ Использовать этот вариант", callback_data="summary_ai_accept")],
+                    [InlineKeyboardButton(text="✏️ Написать самому", callback_data="summary_ai_decline")],
+                ]),
+            )
+        except Exception as exc:
+            logger.error("generate_summary_help failed: %s", exc)
+            await wait_msg.delete()
+            await message.answer(_HELP_EXAMPLES["summary"])
         return
 
     if _is_off_topic(text):
@@ -242,7 +479,12 @@ async def handle_summary(message: Message, state: FSMContext) -> None:
 
 
 async def _save_summary(message: Message, state: FSMContext, text: str) -> None:
-    await state.update_data(summary=text, work_experiences=[], achievement_nudges=0, current_job_index=0)
+    data = await state.get_data()
+    update: dict = {"summary": text, "achievement_nudges": 0}
+    # Only initialise work_experiences on first save — don't wipe existing jobs on re-edit
+    if not data.get("work_experiences"):
+        update["work_experiences"] = []
+    await state.update_data(**update)
     data = await state.get_data()
     await _persist_state(state, data["user_id"])
 
@@ -252,7 +494,7 @@ async def _save_summary(message: Message, state: FSMContext, text: str) -> None:
     )
 
 
-@router.callback_query(F.data == "summary_warning_continue")
+@router.callback_query(F.data == "summary_warning_continue", StateFilter(InterviewStates.summary))
 async def cb_summary_warning_continue(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     data = await state.get_data()
@@ -260,7 +502,7 @@ async def cb_summary_warning_continue(callback: CallbackQuery, state: FSMContext
     await _save_summary(callback.message, state, text)
 
 
-@router.callback_query(F.data == "summary_warning_edit")
+@router.callback_query(F.data == "summary_warning_edit", StateFilter(InterviewStates.summary))
 async def cb_summary_warning_edit(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(InterviewStates.summary)
@@ -269,23 +511,48 @@ async def cb_summary_warning_edit(callback: CallbackQuery, state: FSMContext) ->
     )
 
 
-@router.callback_query(F.data == "summary_ok")
+@router.callback_query(F.data == "summary_ok", StateFilter(InterviewStates.summary))
 async def cb_summary_ok(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    await state.set_state(InterviewStates.work_experience_company)
-    await callback.message.answer(
-        f"{_stage_label(2)}\n\n"
-        "Начнём с опыта работы. Укажите название компании (последнее или текущее место работы)."
-    )
+    data = await state.get_data()
+    # If work experience already exists (user is editing via block_selection) — go back there.
+    # Otherwise continue the linear interview flow.
+    if data.get("work_experiences"):
+        await show_block_selection(callback.message, state)
+    else:
+        await state.set_state(InterviewStates.work_experience_company)
+        await callback.message.answer(
+            f"{_stage_label(2)}\n\n"
+            "Начнём с опыта работы. Укажите название компании (последнее или текущее место работы)."
+        )
 
 
-@router.callback_query(F.data == "summary_redo")
+@router.callback_query(F.data == "summary_redo", StateFilter(InterviewStates.summary))
 async def cb_summary_redo(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(InterviewStates.summary)
     await callback.message.answer(
         "Хорошо. Расскажите о себе заново — 3–5 предложений о Вашем опыте и целях."
     )
+
+
+@router.callback_query(F.data == "summary_ai_accept", StateFilter(InterviewStates.summary))
+async def cb_summary_ai_accept(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    draft = data.get("_ai_summary_draft", "")
+    if draft:
+        await _save_summary(callback.message, state, draft)
+    else:
+        await state.set_state(InterviewStates.summary)
+        await callback.message.answer("Черновик не найден. Напишите текст раздела «О себе» самостоятельно:")
+
+
+@router.callback_query(F.data == "summary_ai_decline", StateFilter(InterviewStates.summary))
+async def cb_summary_ai_decline(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(InterviewStates.summary)
+    await callback.message.answer("Хорошо, напишите свой вариант раздела «О себе» (3–5 предложений):")
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +647,7 @@ async def _save_responsibilities(message: Message, state: FSMContext, text: str)
     )
 
 
-@router.callback_query(F.data == "responsibilities_warning_continue")
+@router.callback_query(F.data == "responsibilities_warning_continue", StateFilter(InterviewStates.work_experience_responsibilities))
 async def cb_responsibilities_warning_continue(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     data = await state.get_data()
@@ -388,7 +655,7 @@ async def cb_responsibilities_warning_continue(callback: CallbackQuery, state: F
     await _save_responsibilities(callback.message, state, text)
 
 
-@router.callback_query(F.data == "responsibilities_warning_edit")
+@router.callback_query(F.data == "responsibilities_warning_edit", StateFilter(InterviewStates.work_experience_responsibilities))
 async def cb_responsibilities_warning_edit(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(InterviewStates.work_experience_responsibilities)
@@ -406,12 +673,16 @@ async def handle_we_achievements(message: Message, state: FSMContext) -> None:
     if _is_help_request(text):
         await message.answer(_HELP_EXAMPLES["work_experience_achievements"])
         return
+    if _is_off_topic(text):
+        await _redirect_off_topic(message, state, 2)
+        return
 
     data = await state.get_data()
     nudges: int = data.get("achievement_nudges", 0)
 
-    # Check if the answer is vague (no digits, no percentages)
-    has_numbers = any(ch.isdigit() for ch in text) or "%" in text
+    # Require a meaningful number: percentage, or a 2+ digit number
+    import re
+    has_numbers = bool(re.search(r'\d+\s*%', text)) or bool(re.search(r'\b\d{2,}\b', text)) or "%" in text
     text_lower = text.lower()
     is_declined = any(w in text_lower for w in ("нет", "не помню", "ничего", "без результ"))
 
@@ -481,7 +752,16 @@ async def _show_we_block_for_confirmation(message: Message, state: FSMContext) -
     )
 
 
-@router.callback_query(F.data == "we_block_ok")
+@router.message(InterviewStates.work_experience_confirm)
+async def handle_we_confirm_text(message: Message, state: FSMContext) -> None:
+    """User typed text instead of pressing confirmation buttons — re-show."""
+    await message.answer(
+        "Пожалуйста, выберите действие с помощью кнопок выше: «Всё верно» или «Исправить».",
+        reply_markup=_yes_no_keyboard("we_block_ok", "we_block_redo"),
+    )
+
+
+@router.callback_query(F.data == "we_block_ok", StateFilter(InterviewStates.work_experience_confirm))
 async def cb_we_block_ok(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     data = await state.get_data()
@@ -499,10 +779,12 @@ async def cb_we_block_ok(callback: CallbackQuery, state: FSMContext) -> None:
     jobs.append(job)
     await state.update_data(work_experiences=jobs)
 
-    # Persist to DB
+    # Persist to DB — clear old records before first insert in this session
     profile = await db.get_candidate_profile(user_id)
     if profile:
         try:
+            if len(jobs) == 1:
+                await db.clear_work_experiences(profile["id"])
             await db.save_work_experience(profile["id"], job)
         except Exception as exc:
             logger.warning("Could not save work experience: %s", exc)
@@ -516,7 +798,7 @@ async def cb_we_block_ok(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.callback_query(F.data == "we_block_redo")
+@router.callback_query(F.data == "we_block_redo", StateFilter(InterviewStates.work_experience_confirm))
 async def cb_we_block_redo(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(InterviewStates.work_experience_company)
@@ -525,7 +807,7 @@ async def cb_we_block_redo(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.callback_query(F.data == "add_more_job")
+@router.callback_query(F.data == "add_more_job", StateFilter(InterviewStates.work_experience_confirm))
 async def cb_add_more_job(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(InterviewStates.work_experience_company)
@@ -534,7 +816,7 @@ async def cb_add_more_job(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.callback_query(F.data == "skip_more_jobs")
+@router.callback_query(F.data == "skip_more_jobs", StateFilter(InterviewStates.work_experience_confirm))
 async def cb_skip_more_jobs(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await _start_skills_stage(callback.message, state)
@@ -594,7 +876,7 @@ async def _start_skills_stage(message: Message, state: FSMContext) -> None:
 async def handle_skills(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if not text:
-        await message.answer("Введите навыки через запятую.")
+        await message.answer("Введите навыки в любом формате.")
         return
     if _is_help_request(text):
         await message.answer(_HELP_EXAMPLES["skills_input"])
@@ -603,7 +885,26 @@ async def handle_skills(message: Message, state: FSMContext) -> None:
         await _redirect_off_topic(message, state, 4)
         return
 
-    skills = [s.strip() for s in text.split(",") if s.strip()]
+    # AI-parse skills from any format
+    wait_msg = await message.answer("Обрабатываю навыки... 🤖")
+    try:
+        from bot.services.ai_service import parse_skills_from_text
+        new_skills = await parse_skills_from_text(text)
+    except Exception as exc:
+        logger.warning("parse_skills_from_text failed, falling back to split: %s", exc)
+        new_skills = [s.strip() for s in text.split(",") if s.strip()]
+    await wait_msg.delete()
+
+    # Append mode: merge with existing skills (dedup)
+    data = await state.get_data()
+    if data.get("_skills_append_mode"):
+        existing = data.get("skills", [])
+        existing_lower = {s.lower() for s in existing}
+        added = [s for s in new_skills if s.lower() not in existing_lower]
+        skills = existing + added
+        await state.update_data(_skills_append_mode=False)
+    else:
+        skills = new_skills
 
     # Quality warning if too few skills
     if len(skills) < 5:
@@ -629,7 +930,7 @@ async def _save_skills(message: Message, state: FSMContext, skills: list[str]) -
     )
 
 
-@router.callback_query(F.data == "skills_warning_continue")
+@router.callback_query(F.data == "skills_warning_continue", StateFilter(InterviewStates.skills_input))
 async def cb_skills_warning_continue(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     data = await state.get_data()
@@ -637,24 +938,29 @@ async def cb_skills_warning_continue(callback: CallbackQuery, state: FSMContext)
     await _save_skills(callback.message, state, skills)
 
 
-@router.callback_query(F.data == "skills_warning_edit")
+@router.callback_query(F.data == "skills_warning_edit", StateFilter(InterviewStates.skills_input))
 async def cb_skills_warning_edit(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
+    data = await state.get_data()
+    existing = data.get("_pending_skills", [])
+    # Keep pending skills and switch to append mode
+    await state.update_data(skills=existing, _skills_append_mode=True)
     await state.set_state(InterviewStates.skills_input)
     await callback.message.answer(
-        "Добавьте навыки через запятую (введите их все снова или только дополнения):"
+        "Добавьте ещё навыки в любом формате — они присоединятся к уже введённым:"
     )
 
 
-@router.callback_query(F.data == "skills_confirmed")
+@router.callback_query(F.data == "skills_confirmed", StateFilter(InterviewStates.skills_input))
 async def cb_skills_confirmed(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     data = await state.get_data()
     user_id = data["user_id"]
 
-    # Persist skills to DB
+    # Persist skills to DB — clear old records first to avoid duplicates
     profile = await db.get_candidate_profile(user_id)
     if profile:
+        await db.clear_skills(profile["id"])
         for skill_name in data.get("skills", []):
             try:
                 await db.save_skill(profile["id"], skill_name, "general")
@@ -669,14 +975,15 @@ async def cb_skills_confirmed(callback: CallbackQuery, state: FSMContext) -> Non
     )
 
 
-@router.callback_query(F.data == "skills_add_more")
+@router.callback_query(F.data == "skills_add_more", StateFilter(InterviewStates.skills_input))
 async def cb_skills_add_more(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    await callback.message.answer(
-        "Добавьте навыки через запятую:"
-    )
-    # Stay in skills_input state to receive additional skills
+    # Enable append mode so new skills are merged with existing
+    await state.update_data(_skills_append_mode=True)
     await state.set_state(InterviewStates.skills_input)
+    await callback.message.answer(
+        "Добавьте ещё навыки в любом формате — можно вставить список, они добавятся к уже введённым:"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -704,6 +1011,7 @@ async def handle_education(message: Message, state: FSMContext) -> None:
     profile = await db.get_candidate_profile(user_id)
     if profile:
         try:
+            await db.clear_education(profile["id"])
             await db.save_education(profile["id"], {"description": text})
         except Exception as exc:
             logger.warning("Could not save education: %s", exc)
@@ -762,30 +1070,71 @@ async def _generate_resume(message: Message, state: FSMContext) -> None:
     user_id = data["user_id"]
 
     # Validate required sections before generating
-    missing = []
+    # Onboarding fields (can't navigate there from here)
+    onboarding_missing = []
     if not data.get("full_name"):
-        missing.append("имя")
+        onboarding_missing.append("имя")
     if not data.get("desired_position"):
-        missing.append("желаемая должность")
-    if not data.get("summary"):
-        missing.append("раздел «О себе»")
-    if not data.get("work_experiences"):
-        missing.append("опыт работы")
-    if not data.get("skills"):
-        missing.append("навыки")
+        onboarding_missing.append("желаемая должность")
     if not data.get("city"):
-        missing.append("город")
+        onboarding_missing.append("город")
+
+    if onboarding_missing:
+        await message.answer(
+            f"⚠️ Отсутствует базовая информация: {', '.join(onboarding_missing)}. "
+            "Пожалуйста, начните с /start."
+        )
+        return
+
+    # Interview fields — show navigation buttons for missing ones
+    interview_nav: list[tuple[str, str]] = []  # (label, callback_data)
+    if not data.get("summary"):
+        interview_nav.append(("О себе", "block_sel_summary"))
+    if not data.get("work_experiences"):
+        interview_nav.append(("Опыт работы", "block_sel_work_exp"))
+    if not data.get("skills"):
+        interview_nav.append(("Навыки", "block_sel_skills"))
 
     education = data.get("education", "")
     if not education or education.lower() in ["", "нет"]:
         await message.answer("💡 Образование не указано — рекомендуем добавить для полноты резюме.")
 
-    if missing:
+    if interview_nav:
+        missing_labels = ", ".join(label for label, _ in interview_nav)
+        buttons = [
+            [InlineKeyboardButton(text=f"➕ {label}", callback_data=cb)]
+            for label, cb in interview_nav
+        ]
         await message.answer(
-            f"⚠️ Для создания резюме необходимо заполнить: {', '.join(missing)}. "
-            "Пожалуйста, пройдите соответствующие этапы."
+            f"⚠️ Для создания резюме не хватает: {missing_labels}.\n"
+            "Выберите раздел для заполнения:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         )
+        await state.set_state(InterviewStates.block_selection)
         return
+
+    # Validate data quality before generating
+    skip_validation = data.get("_skip_validation", False)
+    if not skip_validation:
+        try:
+            from bot.services.ai_service import validate_resume_data
+            issues = await validate_resume_data(data)
+            if issues:
+                issues_text = "\n".join(f"• {issue}" for issue in issues)
+                await state.update_data(_skip_validation=True, _validation_issues=issues)
+                await state.set_state(InterviewStates.generation_confirm)
+                await message.answer(
+                    f"⚠️ Перед генерацией мы заметили несколько вопросов к данным:\n\n{issues_text}\n\n"
+                    "Рекомендуем исправить — ИИ сможет сделать более качественное резюме. "
+                    "Или создайте резюме с текущими данными.",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="✏️ Исправить данные", callback_data="validation_fix")],
+                        [InlineKeyboardButton(text="▶️ Создать резюме как есть", callback_data="validation_proceed")],
+                    ]),
+                )
+                return
+        except Exception as exc:
+            logger.warning("validate_resume_data failed, skipping: %s", exc)
 
     # Detect gender for correct verb forms in О СЕБЕ
     gender = "male"
@@ -821,19 +1170,53 @@ async def _generate_resume(message: Message, state: FSMContext) -> None:
     except Exception as exc:
         logger.error("Could not save resume: %s", exc)
 
+    # Clear validation state — fresh slate for next generation attempt
+    await state.update_data(_validation_issues=[], _skip_validation=False)
     await state.set_state(ResumeStates.viewing_draft)
-    await message.answer(
-        f"Ваше резюме готово:\n\n{resume_text}\n\n"
+
+    footer = (
+        "\n\n"
         "Вы можете отредактировать его командами:\n"
         "«короче» — сделать резюме короче\n"
         "«формальнее» — более официальный стиль\n"
         "«перепиши блок» — переписать конкретный раздел\n"
-        "«добавь навык» — добавить навык",
+        "«добавь навык» — добавить навык\n\n"
+        "📋 Не забудьте добавить контактные данные (email и телефон) — работодатели должны знать, как с Вами связаться.\n\n"
+        "🤖 Резюме создано с помощью ИИ — прочитайте его перед размещением: проверьте точность дат, формулировок и цифр. "
+        "На собеседовании Вас могут попросить подтвердить указанные навыки и достижения — будьте готовы рассказать о них подробнее."
+    )
+    await _send_long_message(
+        message,
+        f"Ваше резюме готово:\n\n{resume_text}{footer}",
         reply_markup=main_keyboard(),
     )
+
+
+@router.callback_query(F.data == "validation_proceed", StateFilter(InterviewStates.generation_confirm))
+async def cb_validation_proceed(callback: CallbackQuery, state: FSMContext) -> None:
+    """User chose to generate resume despite validation warnings."""
+    await callback.answer()
+    await callback.message.answer("Формирую резюме — это займёт несколько секунд...")
+    await _generate_resume(callback.message, state)
+
+
+@router.callback_query(F.data == "validation_fix", StateFilter(InterviewStates.generation_confirm))
+async def cb_validation_fix(callback: CallbackQuery, state: FSMContext) -> None:
+    """User wants to fix data — show block selection with validation issues highlighted."""
+    await callback.answer()
+    # Keep _skip_validation=True so returning here doesn't trigger another validation loop
+    await show_block_selection(callback.message, state)
+
+
+@router.message(InterviewStates.generation_confirm)
+async def handle_generation_confirm_text(message: Message, state: FSMContext) -> None:
+    """Re-show options if user types something in generation_confirm state."""
     await message.answer(
-        "📋 Не забудьте добавить контактные данные (email и телефон) в резюме самостоятельно — "
-        "работодатели обязательно должны знать, как с Вами связаться."
+        "Выберите действие:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Исправить данные", callback_data="validation_fix")],
+            [InlineKeyboardButton(text="▶️ Создать резюме как есть", callback_data="validation_proceed")],
+        ]),
     )
 
 
