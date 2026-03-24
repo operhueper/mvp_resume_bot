@@ -343,10 +343,21 @@ LENGTH & FORMAT:
 - Use "•" as bullet character
 - Dates must be consistent and plausible (end date ≥ start date, no future dates)
 
+CAREER TRANSITION RULES:
+- Compare the candidate's desired_position with their work experience roles.
+- If past roles differ significantly from the target position, emphasize transferable skills in bullet points.
+- Reframe responsibilities to highlight relevance to the target role. For example:
+  - Sales experience for a CSM role → emphasize client relationship management, retention, needs analysis
+  - Developer experience for a PM role → emphasize technical understanding, cross-team communication, requirement analysis
+  - Teacher experience for an HR role → emphasize training, assessment, communication skills
+- Do NOT fabricate experience. Only reframe what was actually provided by the candidate.
+- The professional summary ("О себе") should bridge past experience with the target role naturally.
+
 LANGUAGE:
 - Write entirely in Russian
 - Professional, formal tone
 - No first-person pronouns ("я", "мой") — use impersonal action verbs
+- If candidate data contains placeholders in square brackets like [УКАЖИТЕ ЦИФРУ/ФАКТ] — omit that part or rephrase without specific numbers. NEVER include square brackets in the final resume.
 """
 
 
@@ -401,6 +412,37 @@ async def improve_resume(current_resume: str, instruction: str) -> str:
         user=user,
         temperature=0.5,
         max_tokens=2500,
+    )
+
+
+async def reformulate_achievement(raw_text: str, role: str = "", company: str = "") -> str:
+    """Reformulate casual achievement text into professional resume bullet style."""
+    context_parts = []
+    if role:
+        context_parts.append(f"Должность: {role}")
+    if company:
+        context_parts.append(f"Компания: {company}")
+    context = "\n".join(context_parts)
+
+    return await _chat(
+        model="gpt-4o-mini",
+        system=(
+            "Ты — эксперт по резюме. Пользователь описал своё достижение разговорным языком. "
+            "Перепиши его в профессиональном стиле для резюме.\n\n"
+            "Правила:\n"
+            "- Используй прошедшее время, безличную форму (без «я»).\n"
+            "- Начни с сильного глагола действия (Увеличил, Сократил, Разработал, Внедрил, Оптимизировал и т.д.).\n"
+            "- Сохрани ВСЕ числа и проценты из исходного текста в точности.\n"
+            "- НЕ придумывай новые цифры или метрики.\n"
+            "- Пиши на русском языке.\n"
+            "- Верни только переформулированный текст достижения, без пояснений."
+        ),
+        user=(
+            f"{context}\n\nДостижение кандидата (разговорный стиль):\n{raw_text}\n\n"
+            "Перепиши в профессиональном стиле для резюме:"
+        ),
+        temperature=0.3,
+        max_tokens=300,
     )
 
 
@@ -582,6 +624,99 @@ async def parse_skills_from_text(text: str) -> list[str]:
     return skills
 
 
+async def check_education_completeness(text: str) -> str | None:
+    """Return a clarifying question if education text is missing key details, or None if complete enough.
+
+    Checks for: university/institution name, graduation year, degree level.
+    Uses gpt-4o-mini for speed/cost.
+    """
+    text_lower = text.strip().lower()
+    # If the user explicitly says "no education" — accept as-is
+    if text_lower in ("нет", "no", "не помню", "-", "—"):
+        return None
+
+    raw = await _chat(
+        model="gpt-4o-mini",
+        system=(
+            "Ты помогаешь составлять резюме. Пользователь ввёл информацию об образовании. "
+            "Проверь, содержит ли текст три ключевых элемента:\n"
+            "1. Название учебного заведения (ВУЗ, колледж, школа)\n"
+            "2. Год окончания (или период обучения)\n"
+            "3. Уровень/степень (бакалавр, магистр, специалист, среднее специальное и т.п.) "
+            "или направление/специальность\n\n"
+            "Если все три элемента присутствуют или текст явно говорит об отсутствии образования — "
+            "верни ТОЛЬКО слово: OK\n"
+            "Если чего-то не хватает — верни ОДИН короткий уточняющий вопрос на русском (на «Вы»), "
+            "чтобы получить недостающие детали. Вопрос должен заканчиваться фразой: "
+            "'Или напишите «ок», чтобы оставить как есть.'\n"
+            "Верни только вопрос или OK, без лишнего текста."
+        ),
+        user=f"Текст об образовании: {text}",
+        temperature=0.3,
+        max_tokens=200,
+    )
+    result = raw.strip()
+    if result.upper() in ("OK", "ОК"):
+        return None
+    return result
+
+
+async def check_responsibilities_quality(text: str, role: str = "") -> str | None:
+    """Return a clarifying question if responsibilities are too vague, or None if good enough.
+
+    Uses gpt-4o-mini for speed/cost.
+    """
+    role_context = f" для должности «{role}»" if role else ""
+    raw = await _chat(
+        model="gpt-4o-mini",
+        system=(
+            "Ты эксперт по резюме. Пользователь описал свои обязанности" + role_context + ". "
+            "Оцени, достаточно ли конкретно описаны обязанности, или они слишком расплывчатые и общие. "
+            "Примеры расплывчатых формулировок: «работал с клиентами», «выполнял задачи», "
+            "«участвовал в проектах», «решал вопросы», «занимался различными задачами».\n\n"
+            "Если обязанности описаны слишком обще — задай ОДИН конкретный уточняющий вопрос на русском "
+            "(обращение на «Вы»), чтобы помочь кандидату раскрыть детали: инструменты, масштаб, конкретные задачи.\n"
+            "Если обязанности достаточно конкретны — верни пустую строку.\n\n"
+            "Верни ТОЛЬКО вопрос или пустую строку, без лишнего текста."
+        ),
+        user=f"Обязанности:\n{text}",
+        temperature=0.3,
+        max_tokens=200,
+    )
+    result = raw.strip()
+    return result if result else None
+
+
+async def check_skills_relevance(skills: list[str], desired_position: str) -> list[str] | None:
+    """Return a list of suggested skills if current skills seem misaligned with target position, or None.
+
+    Uses gpt-4o-mini for speed/cost.
+    """
+    raw = await _chat(
+        model="gpt-4o-mini",
+        system=(
+            "Ты эксперт по подбору персонала. Пользователь указал навыки для резюме. "
+            "Сравни их с целевой позицией и определи, не хватает ли важных навыков.\n\n"
+            "Если навыки в целом подходят для позиции — верни пустой JSON-массив [].\n"
+            "Если есть явные пробелы (не хватает ключевых навыков для этой роли) — верни JSON-массив "
+            "из 3–5 конкретных навыков, которые стоит добавить. Навыки должны быть конкретными "
+            "(инструменты, технологии, методологии), а не общими словами.\n\n"
+            "Верни ТОЛЬКО валидный JSON-массив строк, без лишнего текста."
+        ),
+        user=(
+            f"Целевая позиция: {desired_position}\n"
+            f"Указанные навыки: {', '.join(skills)}"
+        ),
+        temperature=0.2,
+        max_tokens=300,
+    )
+    suggestions = _parse_json_list(raw)
+    # Filter out skills that the user already has (case-insensitive)
+    existing_lower = {s.lower() for s in skills}
+    suggestions = [s for s in suggestions if s.lower() not in existing_lower]
+    return suggestions if suggestions else None
+
+
 async def generate_summary_help(
     position: str,
     name: str = "",
@@ -615,3 +750,151 @@ async def generate_summary_help(
         temperature=0.6,
         max_tokens=250,
     )
+
+
+# ---------------------------------------------------------------------------
+# Intent classifier for interview text input
+# ---------------------------------------------------------------------------
+
+_INTENT_SYSTEM = (
+    "Ты классификатор намерений пользователя в чат-боте для составления резюме. "
+    "Пользователь отвечает на вопрос интервью. Определи его намерение.\n\n"
+    "Варианты:\n"
+    "- direct_answer — пользователь отвечает на вопрос по существу (даже кратко)\n"
+    "- help_request — просит пример, помощь, не знает что писать (\"пример\", \"помогите\", \"не знаю\")\n"
+    "- generate_for_me — просит бота придумать/сгенерировать/написать за него "
+    "(\"подумай\", \"придумай\", \"напиши за меня\", \"сгенерируй\", \"что обычно пишут\")\n"
+    "- question — задаёт вопрос о процессе (\"зачем это?\", \"что тут писать?\", \"а можно пропустить?\")\n"
+    "- skip — хочет пропустить этот шаг (\"пропустить\", \"дальше\", \"потом\", \"не хочу\")\n\n"
+    "ВАЖНО:\n"
+    "- Короткие ответы типа \"нет\", \"не помню\" — это direct_answer, НЕ skip.\n"
+    "- Если пользователь описывает свой опыт, навыки, достижения — это direct_answer.\n"
+    "- Если пользователь просит бота ПРИДУМАТЬ контент на основе должности — это generate_for_me.\n\n"
+    "Верни JSON: {\"intent\": \"<одно из пяти значений>\"}"
+)
+
+
+async def classify_intent(
+    text: str,
+    current_field: str,
+    context: dict | None = None,
+) -> str:
+    """Classify user intent in interview context.
+
+    Returns one of: direct_answer, help_request, generate_for_me, question, skip.
+    On any error returns 'direct_answer' (graceful fallback).
+    """
+    try:
+        ctx_parts = [f"Текущий вопрос: {current_field}"]
+        if context:
+            if context.get("role"):
+                ctx_parts.append(f"Должность: {context['role']}")
+            if context.get("company"):
+                ctx_parts.append(f"Компания: {context['company']}")
+            if context.get("desired_position"):
+                ctx_parts.append(f"Желаемая позиция: {context['desired_position']}")
+
+        user_prompt = f"Контекст: {'; '.join(ctx_parts)}\nОтвет пользователя: {text}"
+
+        raw = await _chat(
+            model="gpt-4o-mini",
+            system=_INTENT_SYSTEM,
+            user=user_prompt,
+            temperature=0,
+            max_tokens=80,
+        )
+        result = _parse_json_dict(raw)
+        intent = result.get("intent", "direct_answer")
+        valid = {"direct_answer", "help_request", "generate_for_me", "question", "skip"}
+        return intent if intent in valid else "direct_answer"
+    except Exception as exc:
+        logger.warning("Intent classification failed: %s", exc)
+        return "direct_answer"
+
+
+# ---------------------------------------------------------------------------
+# Generate content for a specific interview field
+# ---------------------------------------------------------------------------
+
+async def generate_field_content(field: str, context: dict) -> str:
+    """Generate draft content for a specific interview field.
+
+    field: 'responsibilities', 'achievements', 'company', 'summary', etc.
+    context: dict with 'role', 'company', 'desired_position', 'dates', etc.
+    """
+    role = context.get("role") or context.get("desired_position") or "специалист"
+    company = context.get("company", "")
+
+    if field == "responsibilities":
+        system = (
+            "Ты помогаешь составлять резюме. Сгенерируй типичные обязанности для указанной должности. "
+            "Напиши 4–6 конкретных пунктов через точку с запятой. Тон: профессиональный. "
+            "Пиши на русском. Не используй местоимения. Только текст обязанностей, без пояснений."
+        )
+        user = f"Должность: {role}" + (f", компания: {company}" if company else "")
+    elif field == "achievements":
+        system = (
+            "Ты помогаешь составлять резюме. Сгенерируй 2–3 примера достижений для указанной должности. "
+            "Где нужны конкретные цифры — оставь метку [ЧИСЛО]. НИКОГДА не придумывай цифры. "
+            "Формат: каждое достижение с новой строки, начинай с глагола прошедшего времени. "
+            "Пиши на русском."
+        )
+        user = f"Должность: {role}" + (f", компания: {company}" if company else "")
+    elif field == "summary":
+        # Delegate to existing function
+        return await generate_summary_help(
+            position=context.get("desired_position", role),
+            name=context.get("full_name", ""),
+            work_experiences=context.get("work_experiences"),
+        )
+    else:
+        system = (
+            "Ты помогаешь составлять резюме. Пользователь просит помочь заполнить поле. "
+            "Дай краткий пример того, что можно написать. Пиши на русском."
+        )
+        user = f"Поле: {field}, должность: {role}"
+
+    return await _chat(
+        model="gpt-4o-mini",
+        system=system,
+        user=user,
+        temperature=0.6,
+        max_tokens=500,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parse free-form work experience
+# ---------------------------------------------------------------------------
+
+async def parse_work_experience_freeform(text: str) -> dict:
+    """Parse free-form work experience description into structured fields.
+
+    Returns dict with keys: company, role, dates, responsibilities, achievements.
+    Missing fields have value None.
+    On failure returns {}.
+    """
+    raw = await _chat(
+        model="gpt-4o-mini",
+        system=(
+            "Ты извлекаешь структурированные данные об опыте работы из свободного текста. "
+            "Извлеки следующие поля:\n"
+            "- company: название компании\n"
+            "- role: должность\n"
+            "- dates: период работы (как написал пользователь)\n"
+            "- responsibilities: обязанности (перечисли через точку с запятой)\n"
+            "- achievements: достижения (если упомянуты)\n\n"
+            "Если поле явно отсутствует в тексте — поставь null. "
+            "НЕ придумывай данные, которых нет в тексте. "
+            "Верни ТОЛЬКО валидный JSON-объект, без markdown-обёртки."
+        ),
+        user=text,
+        temperature=0.1,
+        max_tokens=800,
+    )
+    result = _parse_json_dict(raw)
+    if not result:
+        return {}
+    # Normalize: ensure all expected keys exist
+    fields = ("company", "role", "dates", "responsibilities", "achievements")
+    return {k: result.get(k) for k in fields}

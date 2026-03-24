@@ -165,30 +165,54 @@ async def onboarding_handle_coaching(message: Message, state: FSMContext) -> Non
 
     from bot.services.ai_service import _chat
 
-    prompt = f"Пользователь ищет работу. Он описал свои интересы: '{text}'. Выдели ровно 1 ключевой запрос (до 3 слов) для поиска вакансий на hh.ru по этой специальности. Выведи только этот короткий запрос."
+    prompt = (
+        f"Пользователь ищет работу. Он описал свои интересы: '{text}'. "
+        "Выдели до 3 ключевых запросов (каждый до 3 слов) для поиска вакансий на hh.ru. "
+        "Каждый запрос на новой строке. Если направление одно — выведи один запрос."
+    )
 
     wait_msg = await message.answer("Анализирую Ваши сильные стороны на рынке (hh.ru)... 🤖")
 
     try:
         from bot.services.hh_service import analyze_market_salary
-        query = await _chat(
+        raw_queries = await _chat(
             system="Ты точный алгоритм извлечения ключевых слов.",
             user=prompt,
             model="gpt-4o-mini",
             temperature=0.1,
         )
-        query = query.strip('\'". \n')
+        queries = [q.strip('\'". \n') for q in raw_queries.strip().splitlines() if q.strip()]
+        queries = queries[:3]  # safety cap
+        if not queries:
+            queries = [raw_queries.strip('\'". \n')]
 
-        hh_data = await analyze_market_salary(query)
+        # Fetch HH data for each query, merge titles
+        all_titles: list[str] = []
+        seen_titles_lower: set[str] = set()
+        primary_hh_data: dict | None = None
+
+        for q in queries:
+            hh_data = await analyze_market_salary(q)
+            if primary_hh_data is None and hh_data.get("titles"):
+                primary_hh_data = hh_data
+            for t in hh_data.get("titles", []):
+                t_lower = t.lower()
+                if t_lower not in seen_titles_lower:
+                    seen_titles_lower.add(t_lower)
+                    all_titles.append(t)
+
         await wait_msg.delete()
 
-        if not hh_data.get("titles"):
-            await message.answer(f"ИИ сгенерировал вот такой странный запрос для поиска: «{query}». На hh.ru по нему ничего нормального нет.\n\nНапишите ниже какую-нибудь должность вручную для старта:")
+        queries_display = "», «".join(queries)
+
+        if not all_titles:
+            await message.answer(f"ИИ сгенерировал вот такой странный запрос для поиска: «{queries_display}». На hh.ru по нему ничего нормального нет.\n\nНапишите ниже какую-нибудь должность вручную для старта:")
             await state.set_state(OnboardingStates.waiting_desired_position)
             return
 
-        titles_str = "\n".join(f"• {t}" for t in hh_data["titles"][:3])
-        await message.answer(f"Я проанализировал рынок hh.ru по запросу «{query}»!\nВам отлично подойдут такие роли:\n{titles_str}\n\n{hh_data['text']}\n\nНапишите ниже должность, которую Вы выбираете для этого резюме:")
+        titles_str = "\n".join(f"• {t}" for t in all_titles[:6])
+        salary_text = primary_hh_data["text"] if primary_hh_data else ""
+        await message.answer(f"Я проанализировал рынок hh.ru по запросам «{queries_display}»!\nВам отлично подойдут такие роли:\n{titles_str}\n\n{salary_text}\n\nНапишите ниже должность, которую Вы выбираете для этого резюме:")
         await state.set_state(OnboardingStates.waiting_desired_position)
     except Exception as e:
         logger.error(f"Error in coaching: {e}")

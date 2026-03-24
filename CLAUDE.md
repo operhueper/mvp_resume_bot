@@ -46,8 +46,17 @@ Push to `main` → GitHub Actions (`deploy.yml`) → Railway auto-deploys both s
 
 All FSM state is stored in aiogram `MemoryStorage` (lost on restart) **and** persisted to `rb_users.interview_state` JSONB via `db.save_interview_state()` after each stage. On `/start`, the bot detects existing profiles and shows the block selection hub instead of restarting.
 
+**StateFilter requirement for callback handlers:**
+Every `@router.callback_query` handler MUST have a `StateFilter` specifying the exact state(s) in which the button is valid. Without this, old inline buttons visible in chat history can fire from unrelated states and corrupt the user's flow. Exception: `confirm_delete`/`cancel_delete`/`menu_delete_profile` are intentionally stateless because the "Удалить профиль" persistent keyboard button works from any state.
+
+**DB deduplication pattern:**
+`database.py` provides `clear_work_experiences()`, `clear_skills()`, `clear_education()`. These MUST be called before re-inserting records when a user edits a section, otherwise duplicates accumulate. For work experiences, `clear_work_experiences` is called when `len(jobs) == 1` (first confirm in a session). For skills and education, clear is called every time before inserting.
+
+**`_persist_state` filters internal keys:**
+`_persist_state()` strips all `_`-prefixed keys before saving to DB. This prevents transient flags (like `_skip_validation=True`) from surviving bot restarts.
+
 **Internal FSM state keys (prefixed with `_`):**
-These are transient flags stored alongside user data in FSM state. Never shown to users:
+These are transient flags stored alongside user data in FSM state. Never shown to users and never persisted to DB:
 - `_skip_validation` — set to `True` after validation warning shown; prevents re-running validation on retry. Reset to `False` when user edits any block via `block_selection` callbacks, and after successful resume generation.
 - `_validation_issues` — list of strings from last `validate_resume_data()` run; shown in `show_block_selection` as warnings. Cleared alongside `_skip_validation`.
 - `_skills_append_mode` — merge new skills with existing instead of replacing.
@@ -79,8 +88,15 @@ All resume output uses `_send_long_message()` (defined in interview.py and resum
 **Supabase (database.py):**
 - Supabase Python client is synchronous — all calls are wrapped in `asyncio.to_thread()`.
 - **Critical pattern:** never use `.maybe_single().execute()` — it returns `None` (not an object with `.data`) when no row is found. Always use `.limit(1).execute()` and check `result.data or []`.
+- **Critical pattern:** never use `"now()"` as a value in `.update()` — PostgREST does not evaluate SQL functions. Use `datetime.now(timezone.utc).isoformat()` instead.
 - All tables use the `rb_` prefix (the Supabase project `hh-bot` already has unrelated tables without this prefix).
 - `rb_users.id` is the Telegram user ID (BIGINT), not a UUID.
+
+**File upload field normalization:**
+`parse_resume_file()` returns work experiences with keys `position`, `description`, `start_date`, `end_date`. The interview flow uses `role`, `responsibilities`, `dates`. `_process_uploaded_document` in `start.py` normalizes parsed data to the interview schema before storing in FSM state.
+
+**Persistent keyboard buttons:**
+The 4 persistent reply keyboard buttons ("Моё резюме", "Помощь", "Начать заново", "Удалить профиль") are handled by start.py with no state filter (intentionally — they must work from any state). Handlers in other files (resume.py) that receive text input must explicitly check for and ignore these button texts to avoid treating them as user input.
 
 **AI (services/ai_service.py):**
 - All OpenAI calls go through the internal `_chat()` helper which retries on `APITimeoutError`/`RateLimitError`.

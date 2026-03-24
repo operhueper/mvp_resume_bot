@@ -57,6 +57,7 @@ TOTAL_STAGES = 6
 
 # How many times we nudge the user for a quantified achievement before giving up
 MAX_ACHIEVEMENT_NUDGES = 2
+MAX_EDUCATION_NUDGES = 1
 
 # Help trigger keywords (case-insensitive)
 _HELP_KEYWORDS = {"пример", "помогите", "помощь", "не знаю", "?", "help"}
@@ -147,6 +148,17 @@ def _skill_confirm_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="Навыки верны", callback_data="skills_confirmed"),
                 InlineKeyboardButton(text="Добавить ещё", callback_data="skills_add_more"),
+            ]
+        ]
+    )
+
+
+def _we_mode_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📝 По шагам", callback_data="we_mode_steps"),
+                InlineKeyboardButton(text="✍️ Свободный формат", callback_data="we_mode_freeform"),
             ]
         ]
     )
@@ -284,16 +296,156 @@ async def cb_block_sel_work_exp(callback: CallbackQuery, state: FSMContext) -> N
     data = await state.get_data()
     existing_jobs = data.get("work_experiences", [])
     await state.update_data(_skip_validation=False, _validation_issues=[])
-    await state.set_state(InterviewStates.work_experience_company)
+    prefix = ""
     if existing_jobs:
         companies = ", ".join(j.get("company", "?") for j in existing_jobs)
-        await callback.message.answer(
-            f"Уже добавлены: {companies}.\n\nВведите название следующей компании, чтобы добавить новое место работы:"
-        )
+        prefix = f"Уже добавлены: {companies}.\n\n"
     else:
-        await callback.message.answer(
-            f"{_stage_label(2)}\n\nНачнём с опыта работы. Укажите название компании (последнее или текущее место работы)."
+        prefix = f"{_stage_label(2)}\n\n"
+    await callback.message.answer(
+        f"{prefix}Как Вы хотите описать опыт работы?",
+        reply_markup=_we_mode_keyboard(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Work experience mode choice: step-by-step vs free-form
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data == "we_mode_steps", StateFilter(InterviewStates))
+async def cb_we_mode_steps(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(InterviewStates.work_experience_company)
+    await callback.message.answer(
+        "Укажите название компании (последнее или текущее место работы)."
+    )
+
+
+@router.callback_query(F.data == "we_mode_freeform", StateFilter(InterviewStates))
+async def cb_we_mode_freeform(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(InterviewStates.work_experience_freeform)
+    await callback.message.answer(
+        "Опишите Ваш опыт работы в свободной форме. Например:\n\n"
+        "«Работал в Яндексе продакт-менеджером с 2020 по 2023. "
+        "Запускал новые фичи, управлял командой из 5 человек, "
+        "увеличил конверсию на 30%.»\n\n"
+        "Напишите всё, что помните — я сам разберу по полям:"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Free-form work experience handler
+# ---------------------------------------------------------------------------
+
+# Map field → (state, prompt for missing field)
+_WE_FIELD_ROUTE = {
+    "company": (InterviewStates.work_experience_company, "Не нашёл название компании в тексте. Укажите:"),
+    "role": (InterviewStates.work_experience_role, "Не нашёл должность. Какую позицию Вы занимали?"),
+    "dates": (InterviewStates.work_experience_dates, "Не нашёл период работы. Укажите (например: «2020 — 2023»):"),
+    "responsibilities": (InterviewStates.work_experience_responsibilities, "Не нашёл обязанности. Опишите 3–6 задач:"),
+    "achievements": (InterviewStates.work_experience_achievements, "Опишите Ваши достижения или напишите «нет»:"),
+}
+
+
+async def _route_to_next_missing_or_confirm(message: Message, state: FSMContext) -> None:
+    """Route to the next missing WE field, or to confirmation if all fields are filled."""
+    data = await state.get_data()
+    missing = data.get("_freeform_missing_fields", [])
+    if not missing:
+        await state.update_data(_freeform_missing_fields=None)
+        await _show_we_block_for_confirmation(message, state)
+        return
+
+    field = missing[0]
+    route = _WE_FIELD_ROUTE.get(field)
+    if not route:
+        # Unknown field — skip it
+        remaining = missing[1:]
+        await state.update_data(_freeform_missing_fields=remaining)
+        await _route_to_next_missing_or_confirm(message, state)
+        return
+
+    target_state, prompt = route
+    await state.set_state(target_state)
+    await message.answer(prompt)
+
+
+@router.message(InterviewStates.work_experience_freeform)
+async def handle_we_freeform(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Опишите Ваш опыт работы:")
+        return
+
+    # Intent check works here too
+    if await _handle_intent(message, state, text, "responsibilities"):
+        return
+
+    from bot.services.ai_service import parse_work_experience_freeform
+
+    wait_msg = await message.answer("Анализирую... 🤖")
+    try:
+        parsed = await parse_work_experience_freeform(text)
+        await wait_msg.delete()
+    except Exception as exc:
+        logger.warning("Free-form WE parse failed: %s", exc)
+        await wait_msg.delete()
+        await message.answer(
+            "Не удалось разобрать текст. Давайте заполним по шагам."
         )
+        await state.set_state(InterviewStates.work_experience_company)
+        await message.answer("Укажите название компании:")
+        return
+
+    if not parsed:
+        await message.answer(
+            "Не удалось разобрать текст. Давайте заполним по шагам."
+        )
+        await state.set_state(InterviewStates.work_experience_company)
+        await message.answer("Укажите название компании:")
+        return
+
+    # Populate current_* fields from parsed data
+    missing = []
+    field_map = {
+        "company": "current_company",
+        "role": "current_role",
+        "dates": "current_dates",
+        "responsibilities": "current_responsibilities",
+        "achievements": "current_achievements",
+    }
+    update_data = {"achievement_nudges": 0}
+    for field, state_key in field_map.items():
+        value = parsed.get(field)
+        if value and str(value).strip():
+            update_data[state_key] = str(value).strip()
+        else:
+            missing.append(field)
+
+    await state.update_data(**update_data)
+
+    # Show what was extracted
+    found_parts = []
+    if update_data.get("current_company"):
+        found_parts.append(f"Компания: {update_data['current_company']}")
+    if update_data.get("current_role"):
+        found_parts.append(f"Должность: {update_data['current_role']}")
+    if update_data.get("current_dates"):
+        found_parts.append(f"Период: {update_data['current_dates']}")
+    if update_data.get("current_responsibilities"):
+        found_parts.append(f"Обязанности: {update_data['current_responsibilities']}")
+    if update_data.get("current_achievements"):
+        found_parts.append(f"Достижения: {update_data['current_achievements']}")
+
+    if found_parts:
+        await message.answer("Вот что я нашёл:\n\n" + "\n".join(found_parts))
+
+    if missing:
+        await state.update_data(_freeform_missing_fields=missing)
+        await _route_to_next_missing_or_confirm(message, state)
+    else:
+        await _show_we_block_for_confirmation(message, state)
 
 
 @router.callback_query(F.data == "block_sel_skills", StateFilter(InterviewStates.block_selection))
@@ -301,7 +453,7 @@ async def cb_block_sel_skills(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.answer()
     data = await state.get_data()
     existing = data.get("skills", [])
-    await state.update_data(_skills_append_mode=bool(existing), _skip_validation=False, _validation_issues=[])
+    await state.update_data(_skills_append_mode=bool(existing), _skip_validation=False, _validation_issues=[], _skills_relevance_nudged=False)
     await state.set_state(InterviewStates.skills_input)
     if existing:
         await callback.message.answer(
@@ -317,7 +469,7 @@ async def cb_block_sel_education(callback: CallbackQuery, state: FSMContext) -> 
     await callback.answer()
     data = await state.get_data()
     existing = data.get("education", "")
-    await state.update_data(_skip_validation=False, _validation_issues=[])
+    await state.update_data(_skip_validation=False, _validation_issues=[], education_nudges=0, _pending_education="")
     await state.set_state(InterviewStates.education_input)
     if existing:
         await callback.message.answer(
@@ -388,6 +540,190 @@ async def _redirect_off_topic(message: Message, state: FSMContext, stage_num: in
         f"Я специализируюсь на создании резюме. "
         f"Давайте продолжим — мы на {_stage_label(stage_num)}."
     )
+
+
+# ---------------------------------------------------------------------------
+# Intent classifier integration
+# ---------------------------------------------------------------------------
+
+# Human-readable field labels for the classifier context
+_FIELD_LABELS = {
+    "company": "название компании",
+    "role": "должность",
+    "dates": "период работы",
+    "responsibilities": "обязанности на позиции",
+    "achievements": "достижения и результаты",
+    "summary": "раздел «О себе»",
+    "skills": "профессиональные навыки",
+    "education": "образование",
+    "extras": "дополнительная информация",
+}
+
+# Fields that can be skipped (optional)
+_SKIPPABLE_FIELDS = {"achievements", "education", "extras"}
+
+# Map field → help example key in _HELP_EXAMPLES
+_FIELD_TO_HELP_KEY = {
+    "company": "work_experience_company",
+    "role": "work_experience_role",
+    "dates": "work_experience_dates",
+    "responsibilities": "work_experience_responsibilities",
+    "achievements": "work_experience_achievements",
+    "summary": "summary",
+    "skills": "skills_input",
+    "education": "education_input",
+    "extras": "extras_input",
+}
+
+# Brief explanations of what each field is for (for "question" intent)
+_FIELD_EXPLANATIONS = {
+    "company": "Здесь нужно указать название организации, где Вы работали. Это может быть ООО, ИП, название бренда.",
+    "role": "Укажите Вашу должность — как она называлась в трудовой или как Вы бы описали свою роль.",
+    "dates": "Укажите, когда Вы работали на этой позиции — месяц и год начала и окончания.",
+    "responsibilities": "Опишите, чем Вы занимались на этой позиции: 3–6 основных задач, которые выполняли регулярно.",
+    "achievements": "Опишите конкретные результаты: что улучшили, чего добились. Цифры и проценты делают резюме сильнее.",
+}
+
+
+async def _handle_intent(
+    message: Message,
+    state: FSMContext,
+    text: str,
+    field: str,
+) -> bool:
+    """Check intent via AI and handle non-direct-answer cases.
+
+    Returns True if the message was fully handled (caller should return).
+    Returns False if intent is direct_answer (caller proceeds with normal logic).
+    """
+    # Fast path: known help keywords — no API call needed
+    if _is_help_request(text):
+        help_key = _FIELD_TO_HELP_KEY.get(field, field)
+        if help_key in _HELP_EXAMPLES:
+            await message.answer(_HELP_EXAMPLES[help_key])
+        return True
+
+    # Fast path: skip off-topic check for short greetings
+    if _is_off_topic(text):
+        await _redirect_off_topic(message, state, 2)
+        return True
+
+    # AI classification
+    from bot.services.ai_service import classify_intent, generate_field_content
+
+    data = await state.get_data()
+    context = {
+        "role": data.get("current_role", ""),
+        "company": data.get("current_company", ""),
+        "desired_position": data.get("desired_position", ""),
+    }
+
+    intent = await classify_intent(
+        text,
+        _FIELD_LABELS.get(field, field),
+        context,
+    )
+
+    if intent == "direct_answer":
+        return False
+
+    if intent == "help_request":
+        help_key = _FIELD_TO_HELP_KEY.get(field, field)
+        if help_key in _HELP_EXAMPLES:
+            await message.answer(_HELP_EXAMPLES[help_key])
+        return True
+
+    if intent == "generate_for_me":
+        wait_msg = await message.answer("Генерирую черновик... 🤖")
+        try:
+            draft = await generate_field_content(field, context)
+            await wait_msg.delete()
+        except Exception as exc:
+            logger.warning("generate_field_content failed: %s", exc)
+            await wait_msg.delete()
+            await message.answer("Не удалось сгенерировать. Напишите самостоятельно:")
+            return True
+
+        await state.update_data(**{f"_pending_{field}_draft": draft})
+        await message.answer(
+            f"Вот что я подготовил:\n\n{draft}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Использовать", callback_data=f"gen_accept_{field}"),
+                    InlineKeyboardButton(text="✏️ Напишу сам", callback_data=f"gen_decline_{field}"),
+                ]
+            ]),
+        )
+        return True
+
+    if intent == "question":
+        explanation = _FIELD_EXPLANATIONS.get(field, "Просто опишите своими словами — я помогу оформить.")
+        await message.answer(explanation)
+        return True
+
+    if intent == "skip":
+        if field in _SKIPPABLE_FIELDS:
+            return False  # let the caller handle skip logic (e.g. "нет" for achievements)
+        await message.answer("Это обязательное поле. Пожалуйста, заполните его.")
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Callbacks for AI-generated drafts (accept / decline)
+# ---------------------------------------------------------------------------
+
+# Map field name → (state where draft is generated, save function)
+_WE_STATES = (
+    InterviewStates.work_experience_company,
+    InterviewStates.work_experience_role,
+    InterviewStates.work_experience_dates,
+    InterviewStates.work_experience_responsibilities,
+    InterviewStates.work_experience_achievements,
+    InterviewStates.work_experience_freeform,
+)
+
+
+@router.callback_query(F.data.startswith("gen_accept_"), StateFilter(*_WE_STATES, InterviewStates.summary))
+async def cb_gen_draft_accept(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    field = callback.data.replace("gen_accept_", "")
+    data = await state.get_data()
+    draft = data.get(f"_pending_{field}_draft", "")
+    if not draft:
+        await callback.message.answer("Черновик не найден. Напишите самостоятельно:")
+        return
+
+    # Route the accepted draft to the appropriate save logic
+    msg = callback.message
+    if field == "responsibilities":
+        await _save_responsibilities(msg, state, draft)
+    elif field == "achievements":
+        await state.update_data(current_achievements=draft)
+        await _show_we_block_for_confirmation(msg, state)
+    elif field == "company":
+        await state.update_data(current_company=draft, achievement_nudges=0)
+        await state.set_state(InterviewStates.work_experience_role)
+        await msg.answer("Какую должность Вы занимали в этой компании?")
+    elif field == "role":
+        await state.update_data(current_role=draft)
+        await state.set_state(InterviewStates.work_experience_dates)
+        await msg.answer("Укажите период работы. Например: «март 2021 — февраль 2024» или «2019 — по настоящее время».")
+    elif field == "dates":
+        await state.update_data(current_dates=draft)
+        await state.set_state(InterviewStates.work_experience_responsibilities)
+        await msg.answer("Опишите Ваши основные обязанности на этой позиции. Перечислите 3–6 ключевых задач.")
+    elif field == "summary":
+        await _save_summary(msg, state, draft)
+
+
+@router.callback_query(F.data.startswith("gen_decline_"), StateFilter(*_WE_STATES, InterviewStates.summary))
+async def cb_gen_draft_decline(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    field = callback.data.replace("gen_decline_", "")
+    label = _FIELD_LABELS.get(field, "это поле")
+    await callback.message.answer(f"Хорошо, напишите {label} самостоятельно:")
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +816,7 @@ async def handle_summary(message: Message, state: FSMContext) -> None:
 
 async def _save_summary(message: Message, state: FSMContext, text: str) -> None:
     data = await state.get_data()
-    update: dict = {"summary": text, "achievement_nudges": 0}
+    update: dict = {"summary": text, "achievement_nudges": 0, "responsibilities_nudges": 0}
     # Only initialise work_experiences on first save — don't wipe existing jobs on re-edit
     if not data.get("work_experiences"):
         update["work_experiences"] = []
@@ -520,10 +856,9 @@ async def cb_summary_ok(callback: CallbackQuery, state: FSMContext) -> None:
     if data.get("work_experiences"):
         await show_block_selection(callback.message, state)
     else:
-        await state.set_state(InterviewStates.work_experience_company)
         await callback.message.answer(
-            f"{_stage_label(2)}\n\n"
-            "Начнём с опыта работы. Укажите название компании (последнее или текущее место работы)."
+            f"{_stage_label(2)}\n\nКак Вы хотите описать опыт работы?",
+            reply_markup=_we_mode_keyboard(),
         )
 
 
@@ -541,11 +876,18 @@ async def cb_summary_ai_accept(callback: CallbackQuery, state: FSMContext) -> No
     await callback.answer()
     data = await state.get_data()
     draft = data.get("_ai_summary_draft", "")
-    if draft:
-        await _save_summary(callback.message, state, draft)
-    else:
+    if not draft:
         await state.set_state(InterviewStates.summary)
         await callback.message.answer("Черновик не найден. Напишите текст раздела «О себе» самостоятельно:")
+        return
+    if "[" in draft:
+        await state.set_state(InterviewStates.summary)
+        await callback.message.answer(
+            "⚠️ В тексте есть незаполненные места, отмеченные [УКАЖИТЕ ЦИФРУ/ФАКТ]. "
+            "Пожалуйста, отредактируйте текст — напишите свой вариант с конкретными данными, или без них:"
+        )
+        return
+    await _save_summary(callback.message, state, draft)
 
 
 @router.callback_query(F.data == "summary_ai_decline", StateFilter(InterviewStates.summary))
@@ -566,14 +908,18 @@ async def handle_we_company(message: Message, state: FSMContext) -> None:
     if not text:
         await message.answer("Введите название компании.")
         return
-    if _is_help_request(text):
-        await message.answer(_HELP_EXAMPLES["work_experience_company"])
-        return
-    if _is_off_topic(text):
-        await _redirect_off_topic(message, state, 2)
+    if await _handle_intent(message, state, text, "company"):
         return
 
-    await state.update_data(current_company=text, achievement_nudges=0)
+    await state.update_data(current_company=text, achievement_nudges=0, responsibilities_nudges=0)
+    # Free-form completion mode: skip to next missing field instead of linear flow
+    data = await state.get_data()
+    missing = data.get("_freeform_missing_fields")
+    if missing is not None:
+        remaining = [f for f in missing if f != "company"]
+        await state.update_data(_freeform_missing_fields=remaining)
+        await _route_to_next_missing_or_confirm(message, state)
+        return
     await state.set_state(InterviewStates.work_experience_role)
     await message.answer("Какую должность Вы занимали в этой компании?")
 
@@ -584,11 +930,17 @@ async def handle_we_role(message: Message, state: FSMContext) -> None:
     if not text:
         await message.answer("Введите название должности.")
         return
-    if _is_help_request(text):
-        await message.answer(_HELP_EXAMPLES["work_experience_role"])
+    if await _handle_intent(message, state, text, "role"):
         return
 
     await state.update_data(current_role=text)
+    data = await state.get_data()
+    missing = data.get("_freeform_missing_fields")
+    if missing is not None:
+        remaining = [f for f in missing if f != "role"]
+        await state.update_data(_freeform_missing_fields=remaining)
+        await _route_to_next_missing_or_confirm(message, state)
+        return
     await state.set_state(InterviewStates.work_experience_dates)
     await message.answer(
         "Укажите период работы. Например: «март 2021 — февраль 2024» или «2019 — по настоящее время»."
@@ -601,11 +953,17 @@ async def handle_we_dates(message: Message, state: FSMContext) -> None:
     if not text:
         await message.answer("Введите период работы.")
         return
-    if _is_help_request(text):
-        await message.answer(_HELP_EXAMPLES["work_experience_dates"])
+    if await _handle_intent(message, state, text, "dates"):
         return
 
     await state.update_data(current_dates=text)
+    data = await state.get_data()
+    missing = data.get("_freeform_missing_fields")
+    if missing is not None:
+        remaining = [f for f in missing if f != "dates"]
+        await state.update_data(_freeform_missing_fields=remaining)
+        await _route_to_next_missing_or_confirm(message, state)
+        return
     await state.set_state(InterviewStates.work_experience_responsibilities)
     await message.answer(
         "Опишите Ваши основные обязанности на этой позиции. "
@@ -619,8 +977,7 @@ async def handle_we_responsibilities(message: Message, state: FSMContext) -> Non
     if not text:
         await message.answer("Пожалуйста, опишите Ваши обязанности.")
         return
-    if _is_help_request(text):
-        await message.answer(_HELP_EXAMPLES["work_experience_responsibilities"])
+    if await _handle_intent(message, state, text, "responsibilities"):
         return
 
     # Quality warning if too short
@@ -635,11 +992,50 @@ async def handle_we_responsibilities(message: Message, state: FSMContext) -> Non
         )
         return
 
+    # AI quality nudge: check if responsibilities are too vague (1 nudge max)
+    data = await state.get_data()
+    nudges: int = data.get("responsibilities_nudges", 0)
+    if nudges < 1:
+        from bot.services.ai_service import check_responsibilities_quality
+
+        role = data.get("current_role", "")
+        wait_msg = await message.answer("Анализирую ответ... 🤖")
+        try:
+            ai_question = await check_responsibilities_quality(text, role=role)
+            await wait_msg.delete()
+            if ai_question:
+                await state.update_data(
+                    responsibilities_nudges=nudges + 1,
+                    _pending_responsibilities=text,
+                )
+                await message.answer(
+                    f"💡 {ai_question}",
+                    reply_markup=_warning_keyboard(
+                        continue_data="responsibilities_warning_continue",
+                        edit_data="responsibilities_warning_edit",
+                        edit_label="✏️ Дополнить",
+                    ),
+                )
+                return
+        except Exception as e:
+            logger.error("Error AI responsibilities quality check: %s", e)
+            try:
+                await wait_msg.delete()
+            except Exception:
+                pass
+
     await _save_responsibilities(message, state, text)
 
 
 async def _save_responsibilities(message: Message, state: FSMContext, text: str) -> None:
     await state.update_data(current_responsibilities=text)
+    data = await state.get_data()
+    missing = data.get("_freeform_missing_fields")
+    if missing is not None:
+        remaining = [f for f in missing if f != "responsibilities"]
+        await state.update_data(_freeform_missing_fields=remaining)
+        await _route_to_next_missing_or_confirm(message, state)
+        return
     await state.set_state(InterviewStates.work_experience_achievements)
     await message.answer(
         "Какие результаты Вы достигли на этой позиции? "
@@ -664,17 +1060,81 @@ async def cb_responsibilities_warning_edit(callback: CallbackQuery, state: FSMCo
     )
 
 
+def _achievement_reformulate_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data="achievement_reformulated_ok"),
+                InlineKeyboardButton(text="✏️ Написать свой вариант", callback_data="achievement_reformulated_edit"),
+            ]
+        ]
+    )
+
+
+async def _try_reformulate_achievement(message: Message, state: FSMContext, text: str) -> None:
+    """Try to reformulate casual achievement text into professional style.
+
+    If the text is a decline phrase, saves as-is and proceeds.
+    Otherwise, calls AI reformulation, shows to user for confirmation.
+    """
+    text_lower = text.lower()
+    is_declined = any(w in text_lower for w in ("нет", "не помню", "ничего", "без результ"))
+
+    if is_declined:
+        await state.update_data(current_achievements=text)
+        # Clean up freeform tracking if present
+        data = await state.get_data()
+        if data.get("_freeform_missing_fields") is not None:
+            remaining = [f for f in data["_freeform_missing_fields"] if f != "achievements"]
+            await state.update_data(_freeform_missing_fields=remaining if remaining else None)
+        await _show_we_block_for_confirmation(message, state)
+        return
+
+    data = await state.get_data()
+    role = data.get("current_role", "")
+    company = data.get("current_company", "")
+
+    from bot.services.ai_service import reformulate_achievement
+
+    wait_msg = await message.answer("Формулирую для резюме... 🤖")
+    try:
+        reformulated = await reformulate_achievement(text, role=role, company=company)
+        await wait_msg.delete()
+
+        if reformulated and reformulated.strip() != text.strip():
+            await state.update_data(_pending_achievements_reformulated=reformulated)
+            await state.update_data(current_achievements=text)
+            await state.set_state(InterviewStates.achievements_confirm)
+            await message.answer(
+                f"✏️ Вот как это будет в резюме:\n\n*{reformulated}*\n\n"
+                "Подтвердить или написать свой вариант?",
+                parse_mode="Markdown",
+                reply_markup=_achievement_reformulate_keyboard(),
+            )
+            return
+    except Exception as e:
+        logger.error(f"Error AI reformulate achievement: {e}")
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+
+    # Fallback: save as-is
+    await state.update_data(current_achievements=text)
+    data = await state.get_data()
+    if data.get("_freeform_missing_fields") is not None:
+        remaining = [f for f in data["_freeform_missing_fields"] if f != "achievements"]
+        await state.update_data(_freeform_missing_fields=remaining if remaining else None)
+    await _show_we_block_for_confirmation(message, state)
+
+
 @router.message(InterviewStates.work_experience_achievements)
 async def handle_we_achievements(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if not text:
         await message.answer("Пожалуйста, опишите Ваши достижения или напишите «нет».")
         return
-    if _is_help_request(text):
-        await message.answer(_HELP_EXAMPLES["work_experience_achievements"])
-        return
-    if _is_off_topic(text):
-        await _redirect_off_topic(message, state, 2)
+    if await _handle_intent(message, state, text, "achievements"):
         return
 
     data = await state.get_data()
@@ -698,9 +1158,7 @@ async def handle_we_achievements(message: Message, state: FSMContext) -> None:
             await wait_msg.delete()
             if not ai_question:
                 # AI accepted it or gave up, move on
-                await state.update_data(current_achievements=text)
-                await message.answer("Хорошо, запишем как есть. Переходим к подтверждению блока.")
-                await _show_we_block_for_confirmation(message, state)
+                await _try_reformulate_achievement(message, state, text)
                 return
 
             # Enhanced nudge message for attempt 2
@@ -727,13 +1185,10 @@ async def handle_we_achievements(message: Message, state: FSMContext) -> None:
                     "На сколько процентов/штук/часов Вы улучшили показатели?"
                 )
             else:
-                await state.update_data(current_achievements=text)
-                await message.answer("Хорошо, запишем как есть. Переходим к подтверждению блока.")
-                await _show_we_block_for_confirmation(message, state)
+                await _try_reformulate_achievement(message, state, text)
             return
 
-    await state.update_data(current_achievements=text)
-    await _show_we_block_for_confirmation(message, state)
+    await _try_reformulate_achievement(message, state, text)
 
 
 async def _show_we_block_for_confirmation(message: Message, state: FSMContext) -> None:
@@ -749,6 +1204,40 @@ async def _show_we_block_for_confirmation(message: Message, state: FSMContext) -
     await message.answer(
         f"Блок опыта работы:\n\n{block}",
         reply_markup=_yes_no_keyboard("we_block_ok", "we_block_redo"),
+    )
+
+
+@router.callback_query(F.data == "achievement_reformulated_ok", StateFilter(InterviewStates.achievements_confirm))
+async def cb_achievement_reformulated_ok(callback: CallbackQuery, state: FSMContext) -> None:
+    """User confirmed the AI-reformulated achievement — save it and proceed."""
+    await callback.answer()
+    data = await state.get_data()
+    reformulated = data.get("_pending_achievements_reformulated", "")
+    if reformulated:
+        await state.update_data(current_achievements=reformulated)
+    await _show_we_block_for_confirmation(callback.message, state)
+
+
+@router.callback_query(F.data == "achievement_reformulated_edit", StateFilter(InterviewStates.achievements_confirm))
+async def cb_achievement_reformulated_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    """User wants to write their own version — go back to achievements input."""
+    await callback.answer()
+    await state.set_state(InterviewStates.work_experience_achievements)
+    await callback.message.answer(
+        "Хорошо, напишите свой вариант достижений:"
+    )
+
+
+@router.message(InterviewStates.achievements_confirm)
+async def handle_achievements_confirm_text(message: Message, state: FSMContext) -> None:
+    """User typed text instead of pressing buttons — re-show the reformulation."""
+    data = await state.get_data()
+    reformulated = data.get("_pending_achievements_reformulated", "")
+    await message.answer(
+        f"✏️ Вот как это будет в резюме:\n\n*{reformulated}*\n\n"
+        "Подтвердить или написать свой вариант?",
+        parse_mode="Markdown",
+        reply_markup=_achievement_reformulate_keyboard(),
     )
 
 
@@ -810,9 +1299,9 @@ async def cb_we_block_redo(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "add_more_job", StateFilter(InterviewStates.work_experience_confirm))
 async def cb_add_more_job(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    await state.set_state(InterviewStates.work_experience_company)
     await callback.message.answer(
-        "Введите название следующей компании."
+        "Как Вы хотите описать следующее место работы?",
+        reply_markup=_we_mode_keyboard(),
     )
 
 
@@ -919,6 +1408,38 @@ async def handle_skills(message: Message, state: FSMContext) -> None:
         )
         return
 
+    # AI relevance check: suggest missing skills for target position (1 nudge max)
+    if not data.get("_skills_relevance_nudged"):
+        desired_position = data.get("desired_position", "")
+        if desired_position:
+            from bot.services.ai_service import check_skills_relevance
+
+            try:
+                suggestions = await check_skills_relevance(skills, desired_position)
+                if suggestions:
+                    await state.update_data(
+                        _skills_relevance_nudged=True,
+                        _skills_append_mode=True,
+                        skills=skills,
+                    )
+                    suggestion_text = ", ".join(suggestions)
+                    await message.answer(
+                        f"💡 Для позиции «{desired_position}» также полезны навыки: "
+                        f"{suggestion_text}. Хотите добавить? "
+                        "Напишите дополнительные навыки или нажмите «Продолжить».",
+                        reply_markup=InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [InlineKeyboardButton(
+                                    text="▶️ Продолжить",
+                                    callback_data="skills_relevance_continue",
+                                )]
+                            ]
+                        ),
+                    )
+                    return
+            except Exception as e:
+                logger.error("Error AI skills relevance check: %s", e)
+
     await _save_skills(message, state, skills)
 
 
@@ -951,6 +1472,14 @@ async def cb_skills_warning_edit(callback: CallbackQuery, state: FSMContext) -> 
     )
 
 
+@router.callback_query(F.data == "skills_relevance_continue", StateFilter(InterviewStates.skills_input))
+async def cb_skills_relevance_continue(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    skills = data.get("skills", [])
+    await _save_skills(callback.message, state, skills)
+
+
 @router.callback_query(F.data == "skills_confirmed", StateFilter(InterviewStates.skills_input))
 async def cb_skills_confirmed(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
@@ -968,6 +1497,7 @@ async def cb_skills_confirmed(callback: CallbackQuery, state: FSMContext) -> Non
                 logger.warning("Could not save skill '%s': %s", skill_name, exc)
 
     await _persist_state(state, user_id)
+    await state.update_data(education_nudges=0, _pending_education="")
     await state.set_state(InterviewStates.education_input)
     await callback.message.answer(
         f"{_stage_label(5)}\n\n"
@@ -1004,7 +1534,42 @@ async def handle_education(message: Message, state: FSMContext) -> None:
         await _redirect_off_topic(message, state, 5)
         return
 
-    await state.update_data(education=text)
+    data = await state.get_data()
+    nudges: int = data.get("education_nudges", 0)
+    text_lower = text.lower().strip()
+
+    # Check if user is accepting the nudge prompt ("ок", "нет", "не помню", etc.)
+    is_accept_as_is = any(w in text_lower for w in ("ок", "ok", "не помню", "не знаю", "не важно", "пропустить"))
+
+    # If there's a pending education text from a previous nudge and user accepts — use the pending text
+    pending_education = data.get("_pending_education", "")
+    if pending_education and is_accept_as_is:
+        text = pending_education
+    elif pending_education and not is_accept_as_is:
+        # User provided more details — combine with original text
+        text = f"{pending_education}. {text}"
+        await state.update_data(_pending_education="")
+
+    # Nudge once if education text is incomplete (not "нет" and first attempt)
+    if not is_accept_as_is and nudges < MAX_EDUCATION_NUDGES and text_lower not in ("нет", "no", "-", "—"):
+        from bot.services.ai_service import check_education_completeness
+
+        try:
+            ai_question = await check_education_completeness(text)
+        except Exception as exc:
+            logger.warning("Education completeness check failed: %s", exc)
+            ai_question = None
+
+        if ai_question:
+            await state.update_data(
+                education_nudges=nudges + 1,
+                _pending_education=text,
+            )
+            await message.answer(ai_question)
+            return
+
+    # Save education
+    await state.update_data(education=text, _pending_education="")
     data = await state.get_data()
     user_id = data["user_id"]
 

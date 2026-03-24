@@ -16,11 +16,13 @@ class InterviewStates(StatesGroup):
     block_selection = State()  # navigation hub: choose which block to edit/fill
     generation_confirm = State()  # waiting for user to confirm after validation warning
     summary = State()
+    work_experience_freeform = State()  # free-form WE input (alternative to step-by-step)
     work_experience_company = State()
     work_experience_role = State()
     work_experience_dates = State()
     work_experience_responsibilities = State()
     work_experience_achievements = State()
+    achievements_confirm = State()  # waiting after AI reformulation shown
     work_experience_confirm = State()
     skills_input = State()
     education_input = State()
