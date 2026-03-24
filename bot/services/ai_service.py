@@ -280,7 +280,10 @@ async def evaluate_parsed_resume(profile_data: dict) -> str:
         "3. Missing key skills. "
         "Write a short, friendly message in Russian using formal 'Вы' address. "
         "Praise what's good, but clearly point out the problems. "
-        "Keep it under 4 sentences. Do NOT rewrite the resume, just give the critique."
+        "Keep it under 4 sentences. Do NOT rewrite the resume, just give the critique. "
+        "IMPORTANT: Do NOT use a letter format. Do NOT start with 'Уважаемый' or any salutation. "
+        "Do NOT end with a signature, sign-off, or '[Ваше имя]'. "
+        "Start directly with the critique, e.g. 'Ваш опыт в...'"
     )
     user = f"Parsed resume data:\n\n{json.dumps(profile_data, ensure_ascii=False)}"
     return await _chat(
@@ -898,3 +901,17 @@ async def parse_work_experience_freeform(text: str) -> dict:
     # Normalize: ensure all expected keys exist
     fields = ("company", "role", "dates", "responsibilities", "achievements")
     return {k: result.get(k) for k in fields}
+
+
+async def transcribe_voice(audio_bytes: bytes) -> str:
+    """Transcribe a voice message (ogg/mp3/wav) using OpenAI Whisper."""
+    import io
+    client = _get_client()
+    buf = io.BytesIO(audio_bytes)
+    buf.name = "voice.ogg"
+    result = await client.audio.transcriptions.create(
+        model="whisper-1",
+        file=buf,
+        language="ru",
+    )
+    return result.text.strip()

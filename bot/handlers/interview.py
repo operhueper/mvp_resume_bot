@@ -296,16 +296,19 @@ async def cb_block_sel_work_exp(callback: CallbackQuery, state: FSMContext) -> N
     data = await state.get_data()
     existing_jobs = data.get("work_experiences", [])
     await state.update_data(_skip_validation=False, _validation_issues=[])
-    prefix = ""
     if existing_jobs:
+        # Block already filled — skip mode selection, go straight to add-more/done choice
+        await state.set_state(InterviewStates.work_experience_confirm)
         companies = ", ".join(j.get("company", "?") for j in existing_jobs)
-        prefix = f"Уже добавлены: {companies}.\n\n"
+        await callback.message.answer(
+            f"Добавленные места работы: {companies}.\n\nДобавить ещё или перейти дальше?",
+            reply_markup=_more_jobs_keyboard(),
+        )
     else:
-        prefix = f"{_stage_label(2)}\n\n"
-    await callback.message.answer(
-        f"{prefix}Как Вы хотите описать опыт работы?",
-        reply_markup=_we_mode_keyboard(),
-    )
+        await callback.message.answer(
+            f"{_stage_label(2)}\n\nКак Вы хотите описать опыт работы?",
+            reply_markup=_we_mode_keyboard(),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +320,8 @@ async def cb_we_mode_steps(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(InterviewStates.work_experience_company)
     await callback.message.answer(
-        "Укажите название компании (последнее или текущее место работы)."
+        "Укажите название компании (последнее или текущее место работы).\n\n"
+        "🎙 Можно ответить голосом"
     )
 
 
@@ -330,7 +334,8 @@ async def cb_we_mode_freeform(callback: CallbackQuery, state: FSMContext) -> Non
         "«Работал в Яндексе продакт-менеджером с 2020 по 2023. "
         "Запускал новые фичи, управлял командой из 5 человек, "
         "увеличил конверсию на 30%.»\n\n"
-        "Напишите всё, что помните — я сам разберу по полям:"
+        "Напишите всё, что помните — я сам разберу по полям.\n\n"
+        "🎙 Можно ответить голосом"
     )
 
 
@@ -425,21 +430,7 @@ async def handle_we_freeform(message: Message, state: FSMContext) -> None:
 
     await state.update_data(**update_data)
 
-    # Show what was extracted
-    found_parts = []
-    if update_data.get("current_company"):
-        found_parts.append(f"Компания: {update_data['current_company']}")
-    if update_data.get("current_role"):
-        found_parts.append(f"Должность: {update_data['current_role']}")
-    if update_data.get("current_dates"):
-        found_parts.append(f"Период: {update_data['current_dates']}")
-    if update_data.get("current_responsibilities"):
-        found_parts.append(f"Обязанности: {update_data['current_responsibilities']}")
-    if update_data.get("current_achievements"):
-        found_parts.append(f"Достижения: {update_data['current_achievements']}")
-
-    if found_parts:
-        await message.answer("Вот что я нашёл:\n\n" + "\n".join(found_parts))
+    # No need to echo extracted data — confirmation block will show everything
 
     if missing:
         await state.update_data(_freeform_missing_fields=missing)
@@ -477,7 +468,8 @@ async def cb_block_sel_education(callback: CallbackQuery, state: FSMContext) -> 
         )
     else:
         await callback.message.answer(
-            f"{_stage_label(5)}\n\nУкажите Ваше образование: учебное заведение, специальность и год окончания."
+            f"{_stage_label(5)}\n\nУкажите Ваше образование: учебное заведение, специальность и год окончания.\n\n"
+            "🎙 Можно ответить голосом"
         )
 
 
@@ -498,7 +490,8 @@ async def cb_block_sel_extras(callback: CallbackQuery, state: FSMContext) -> Non
             "— Желаемый уровень зарплаты\n"
             "— Предпочтения по формату работы\n"
             "— Готовность к командировкам\n\n"
-            "Если не актуально — напишите «нет»."
+            "Если не актуально — напишите «нет».\n\n"
+            "🎙 Можно ответить голосом"
         )
 
 
@@ -757,7 +750,8 @@ async def ask_summary(message: Message, state: FSMContext) -> None:
         f"{_stage_label(1)}\n\n"
         f"Расскажите о себе в 3–5 предложениях: кто Вы как специалист, "
         f"сколько лет опыта, чем занимаетесь сейчас и что ищете в роли {desired_position}.\n\n"
-        "Это будет раздел «О себе» в Вашем резюме."
+        "Это будет раздел «О себе» в Вашем резюме.\n\n"
+        "🎙 Можно ответить голосом"
     )
 
 
@@ -921,7 +915,7 @@ async def handle_we_company(message: Message, state: FSMContext) -> None:
         await _route_to_next_missing_or_confirm(message, state)
         return
     await state.set_state(InterviewStates.work_experience_role)
-    await message.answer("Какую должность Вы занимали в этой компании?")
+    await message.answer("Какую должность Вы занимали в этой компании?\n\n🎙 Можно ответить голосом")
 
 
 @router.message(InterviewStates.work_experience_role)
@@ -943,7 +937,8 @@ async def handle_we_role(message: Message, state: FSMContext) -> None:
         return
     await state.set_state(InterviewStates.work_experience_dates)
     await message.answer(
-        "Укажите период работы. Например: «март 2021 — февраль 2024» или «2019 — по настоящее время»."
+        "Укажите период работы. Например: «март 2021 — февраль 2024» или «2019 — по настоящее время».\n\n"
+        "🎙 Можно ответить голосом"
     )
 
 
@@ -967,7 +962,8 @@ async def handle_we_dates(message: Message, state: FSMContext) -> None:
     await state.set_state(InterviewStates.work_experience_responsibilities)
     await message.answer(
         "Опишите Ваши основные обязанности на этой позиции. "
-        "Перечислите 3–6 ключевых задач."
+        "Перечислите 3–6 ключевых задач.\n\n"
+        "🎙 Можно ответить голосом"
     )
 
 
@@ -1039,7 +1035,8 @@ async def _save_responsibilities(message: Message, state: FSMContext, text: str)
     await state.set_state(InterviewStates.work_experience_achievements)
     await message.answer(
         "Какие результаты Вы достигли на этой позиции? "
-        "Постарайтесь упомянуть конкретные достижения."
+        "Постарайтесь упомянуть конкретные достижения.\n\n"
+        "🎙 Можно ответить голосом"
     )
 
 
@@ -1350,14 +1347,16 @@ async def _start_skills_stage(message: Message, state: FSMContext) -> None:
         await message.answer(
             f"{_stage_label(4)}\n\n"
             f"Вот навыки, которые часто встречаются для этой роли:\n{numbered}\n\n"
-            "Введите навыки, которыми Вы владеете (через запятую), или добавьте свои:"
+            "Введите навыки, которыми Вы владеете (через запятую), или добавьте свои:\n\n"
+            "🎙 Можно ответить голосом"
         )
     else:
         # Step 3: Manual fallback
         await message.answer(
             f"{_stage_label(4)}\n\n"
             "Перечислите Ваши ключевые навыки через запятую. "
-            "Укажите как профессиональные, так и инструментальные навыки."
+            "Укажите как профессиональные, так и инструментальные навыки.\n\n"
+            "🎙 Можно ответить голосом"
         )
 
 

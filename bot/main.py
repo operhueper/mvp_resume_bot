@@ -10,6 +10,7 @@ from aiogram.types import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.config import settings
 from bot.handlers import start, interview, resume
+from bot.middleware import VoiceToTextMiddleware
 import bot.database as db
 
 # ---------------------------------------------------------------------------
@@ -90,9 +91,10 @@ async def main() -> None:
     # Register bot commands (shows Меню button in Telegram)
     await bot.set_my_commands([
         BotCommand(command="start", description="Начать / главное меню"),
-        BotCommand(command="back", description="Назад — выбор раздела резюме"),
-        BotCommand(command="save", description="Сохранить текущий прогресс"),
     ])
+
+    # Register voice-to-text middleware (runs before all handlers)
+    dp.message.middleware(VoiceToTextMiddleware())
 
     # Register routers in priority order — fallback_router LAST
     dp.include_router(start.router)
