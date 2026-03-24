@@ -457,7 +457,7 @@ async def _start_interview(message: Message, state: FSMContext) -> None:
 # Main menu callbacks (inline keyboard from profile page)
 # ---------------------------------------------------------------------------
 
-@router.callback_query(F.data == "menu_continue_interview", StateFilter(default_state, None))
+@router.callback_query(F.data == "menu_continue_interview", StateFilter(default_state))
 async def cb_continue_interview(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     data = await state.get_data()
