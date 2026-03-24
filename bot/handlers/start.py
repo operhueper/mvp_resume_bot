@@ -148,8 +148,8 @@ async def onboarding_city(message: Message, state: FSMContext) -> None:
             profile_data={
                 "desired_position": data.get("desired_position", ""),
                 "full_name": data.get("full_name", ""),
-                "contacts": data.get("contacts", ""),
                 "city": city,
+                "raw_data": {"contacts": data.get("contacts", "")},
             },
         )
         await state.update_data(profile_id=profile_id)
