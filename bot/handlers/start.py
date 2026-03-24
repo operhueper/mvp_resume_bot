@@ -495,6 +495,14 @@ async def cb_continue_interview(callback: CallbackQuery, state: FSMContext) -> N
     if saved:
         await state.update_data(**saved)
 
+    # Restore onboarding fields (full_name, desired_position, city) from profile
+    # in case interview_state JSONB pre-dates their inclusion or was saved without them.
+    profile = await db.get_candidate_profile(user_id)
+    if profile:
+        patch = {k: profile[k] for k in ("full_name", "desired_position", "city", "profile_id") if profile.get(k)}
+        if patch:
+            await state.update_data(**patch)
+
     from bot.handlers.interview import show_block_selection
     await show_block_selection(callback.message, state)
 
@@ -558,6 +566,13 @@ async def cb_autocontinue_resume(callback: CallbackQuery, state: FSMContext) -> 
     saved = await db.get_interview_state(user_id)
     if saved:
         await state.update_data(**saved)
+
+    # Restore onboarding fields from profile (same logic as cb_continue_interview)
+    profile = await db.get_candidate_profile(user_id)
+    if profile:
+        patch = {k: profile[k] for k in ("full_name", "desired_position", "city", "profile_id") if profile.get(k)}
+        if patch:
+            await state.update_data(**patch)
 
     from bot.handlers.interview import show_block_selection
     await show_block_selection(callback.message, state)
