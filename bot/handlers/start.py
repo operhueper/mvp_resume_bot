@@ -47,6 +47,15 @@ def _confirm_delete_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _choose_path_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Я знаю, кем хочу работать", callback_data="path_know")],
+            [InlineKeyboardButton(text="Напиши 2 вопроса, чтобы помочь выбрать", callback_data="path_help")],
+        ]
+    )
+
+
 # ---------------------------------------------------------------------------
 # /start
 # ---------------------------------------------------------------------------
@@ -74,7 +83,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     # New user — start onboarding
     await state.clear()
     await state.update_data(user_id=user_id)
-    await state.set_state(OnboardingStates.waiting_desired_position)
+    await state.set_state(OnboardingStates.choosing_path)
     await message.answer(
         "Знакомо?\n\n"
         "— Отправил 50 резюме — ни одного ответа\n"
@@ -82,8 +91,58 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         "— 75% резюме отсеивает робот ещё до живого HR\n\n"
         "Я помогу это исправить. За 7 минут мы вместе создадим резюме, "
         "которое проходит AI-скрининг и попадает к нужным людям — бесплатно.\n\n"
-        "Для начала: на какую позицию вы ищете работу?"
+        "Вы уже знаете, на какую должность будете откликаться, или вам нужна помощь с выбором?",
+        reply_markup=_choose_path_keyboard()
     )
+
+
+# ---------------------------------------------------------------------------
+# Onboarding: collect desired position
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data == "path_know")
+async def onboarding_path_know(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(OnboardingStates.waiting_desired_position)
+    await callback.message.answer("Отлично! На какую позицию вы ищете работу? (введите название текстом)")
+
+
+@router.callback_query(F.data == "path_help")
+async def onboarding_path_help(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(OnboardingStates.coaching_questions)
+    await callback.message.answer(
+        "Давайте подберём идеальную профессию! \n\n"
+        "Ответьте на пару простых вопросов:\n"
+        "1. Что вам больше всего нравится делать (например: общаться с людьми, копаться в таблицах, управлять процессами)?\n"
+        "2. Что у вас получается лучше всего? (в чем ваша супер-сила по мнению коллег/друзей?)"
+    )
+
+
+@router.message(OnboardingStates.coaching_questions)
+async def onboarding_handle_coaching(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Пожалуйста, расскажите немного о себе текстом.")
+        return
+        
+    # Temporary mock implementation for fast AI response
+    from bot.services.ai_service import _chat
+    
+    prompt = f"Пользователь ищет работу. Он описал свои интересы: '{text}'. Предложи 3 конкретные должности на рынке СНГ, которые могут ему подойти, сопроводи кратким ободряющим комментарием. Ответ должен быть мотивирующим и коротким. Формат списка."
+    
+    wait_msg = await message.answer("Анализирую ваши сильные стороны... 🤖")
+    
+    try:
+        response = await _chat(prompt, model="gpt-4o-mini", temperature=0.7)
+        await wait_msg.delete()
+        await message.answer(f"Вот что я увидел в ваших ответах:\n\n{response}\n\nНапишите ниже должность, которую вы выбираете для этого резюме:")
+        await state.set_state(OnboardingStates.waiting_desired_position)
+    except Exception as e:
+        logger.error(f"Error in coaching: {e}")
+        await wait_msg.delete()
+        await message.answer("Извините, не удалось подключиться к ИИ. Напишите какую-нибудь должность вручную для старта:")
+        await state.set_state(OnboardingStates.waiting_desired_position)
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,8 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class OnboardingStates(StatesGroup):
+    choosing_path = State()
+    coaching_questions = State()
     waiting_desired_position = State()
     waiting_name = State()
     waiting_contacts = State()   # email + phone in one message or separate
