@@ -4,22 +4,62 @@ on:
   push:
     branches: [main]
 
+env:
+  RAILWAY_API: https://backboard.railway.app/graphql/v2
+  ENV_ID: f70012a2-0289-47af-aaf1-28f4ae18935e
+  BOT_SERVICE_ID: 9af035bf-5518-42b1-8e7b-4026f7f18547
+  DASH_SERVICE_ID: 4698d4ce-d83f-403e-8844-770d06d70f86
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy bot to Railway
+      - name: Resolve Railway project ID
+        id: project
         run: |
-          curl -s -X POST "https://backboard.railway.app/graphql/v2" \
+          RESULT=$(curl -s -X POST "$RAILWAY_API" \
             -H "Authorization: Bearer ${{ secrets.RAILWAY_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "{\"query\": \"mutation { serviceInstanceDeploy(environmentId: \\\"f70012a2-0289-47af-aaf1-28f4ae18935e\\\", serviceId: \\\"9af035bf-5518-42b1-8e7b-4026f7f18547\\\", commitSha: \\\"${{ github.sha }}\\\") }\"}"
+            -d '{"query":"query{projects{edges{node{id environments{edges{node{id}}}}}}}"}')
+          PROJECT_ID=$(echo "$RESULT" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          for p in data['data']['projects']['edges']:
+              for e in p['node']['environments']['edges']:
+                  if e['node']['id'] == '${{ env.ENV_ID }}':
+                      print(p['node']['id'])
+                      sys.exit(0)
+          ")
+          echo "id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Sync bot env vars to Railway
+        run: |
+          upsert_var() {
+            local name="$1" value="$2"
+            curl -s -X POST "$RAILWAY_API" \
+              -H "Authorization: Bearer ${{ secrets.RAILWAY_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -d "{\"query\":\"mutation{variableUpsert(input:{projectId:\\\"${{ steps.project.outputs.id }}\\\",environmentId:\\\"${{ env.ENV_ID }}\\\",serviceId:\\\"${{ env.BOT_SERVICE_ID }}\\\",name:\\\"$name\\\",value:\\\"$value\\\"})}\"}"> /dev/null
+          }
+          upsert_var "TELEGRAM_BOT_TOKEN"  "${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          upsert_var "OPENAI_API_KEY"       "${{ secrets.OPENAI_API_KEY }}"
+          upsert_var "ADMIN_TELEGRAM_ID"    "${{ secrets.ADMIN_TELEGRAM_ID }}"
+          upsert_var "SUPABASE_URL"         "${{ secrets.SUPABASE_URL }}"
+          upsert_var "SUPABASE_ANON_KEY"    "${{ secrets.SUPABASE_ANON_KEY }}"
+          upsert_var "SUPABASE_SERVICE_KEY" "${{ secrets.SUPABASE_SERVICE_KEY }}"
+
+      - name: Deploy bot to Railway
+        run: |
+          curl -s -X POST "$RAILWAY_API" \
+            -H "Authorization: Bearer ${{ secrets.RAILWAY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\": \"mutation { serviceInstanceDeploy(environmentId: \\\"${{ env.ENV_ID }}\\\", serviceId: \\\"${{ env.BOT_SERVICE_ID }}\\\", commitSha: \\\"${{ github.sha }}\\\") }\"}"
 
       - name: Deploy dashboard to Railway
         run: |
-          curl -s -X POST "https://backboard.railway.app/graphql/v2" \
+          curl -s -X POST "$RAILWAY_API" \
             -H "Authorization: Bearer ${{ secrets.RAILWAY_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "{\"query\": \"mutation { serviceInstanceDeploy(environmentId: \\\"f70012a2-0289-47af-aaf1-28f4ae18935e\\\", serviceId: \\\"4698d4ce-d83f-403e-8844-770d06d70f86\\\", commitSha: \\\"${{ github.sha }}\\\") }\"}"
+            -d "{\"query\": \"mutation { serviceInstanceDeploy(environmentId: \\\"${{ env.ENV_ID }}\\\", serviceId: \\\"${{ env.DASH_SERVICE_ID }}\\\", commitSha: \\\"${{ github.sha }}\\\") }\"}"
