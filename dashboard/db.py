@@ -1,6 +1,6 @@
 """
 Supabase queries for the admin dashboard.
-All calls are synchronous (Supabase Python client is sync).
+Uses httpx directly against Supabase REST API to avoid SDK dependency conflicts.
 """
 from __future__ import annotations
 
@@ -8,18 +8,41 @@ import os
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
-from supabase import create_client, Client
+import httpx
 
-_client: Client | None = None
+_SUPABASE_URL: str = ""
+_SUPABASE_KEY: str = ""
 
 
-def get_client() -> Client:
-    global _client
-    if _client is None:
-        url = os.getenv("SUPABASE_URL", "")
-        key = os.getenv("SUPABASE_SERVICE_KEY", "")
-        _client = create_client(url, key)
-    return _client
+def _headers() -> dict[str, str]:
+    global _SUPABASE_URL, _SUPABASE_KEY
+    if not _SUPABASE_URL:
+        _SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+        _SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+    return {
+        "apikey": _SUPABASE_KEY,
+        "Authorization": f"Bearer {_SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+
+
+def _get(table: str, params: dict | None = None) -> list[dict]:
+    url = f"{_SUPABASE_URL}/rest/v1/{table}"
+    resp = httpx.get(url, headers=_headers(), params=params or {}, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _count(table: str, params: dict | None = None) -> int:
+    url = f"{_SUPABASE_URL}/rest/v1/{table}"
+    headers = {**_headers(), "Prefer": "count=exact"}
+    resp = httpx.head(url, headers=headers, params=params or {}, timeout=15)
+    content_range = resp.headers.get("content-range", "0/0")
+    try:
+        return int(content_range.split("/")[-1])
+    except Exception:
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -27,35 +50,15 @@ def get_client() -> Client:
 # ---------------------------------------------------------------------------
 
 def get_overview_stats() -> dict[str, Any]:
-    db = get_client()
+    total_users = _count("rb_users")
 
-    # Total users
-    total_result = db.table("rb_users").select("*", count="exact").execute()
-    total_users = total_result.count or 0
-
-    # Users today (created_at >= today 00:00 UTC)
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    today_result = (
-        db.table("rb_users")
-        .select("*", count="exact")
-        .gte("created_at", today_start.isoformat())
-        .execute()
-    )
-    users_today = today_result.count or 0
+    users_today = _count("rb_users", {"created_at": f"gte.{today_start.isoformat()}"})
 
-    # Total resumes
-    resumes_result = db.table("rb_resumes").select("*", count="exact").execute()
-    total_resumes = resumes_result.count or 0
+    total_resumes = _count("rb_resumes")
 
-    # Resumes this week
     week_start = datetime.now(timezone.utc) - timedelta(days=7)
-    resumes_week_result = (
-        db.table("rb_resumes")
-        .select("*", count="exact")
-        .gte("created_at", week_start.isoformat())
-        .execute()
-    )
-    resumes_this_week = resumes_week_result.count or 0
+    resumes_this_week = _count("rb_resumes", {"created_at": f"gte.{week_start.isoformat()}"})
 
     return {
         "total_users": total_users,
@@ -66,34 +69,20 @@ def get_overview_stats() -> dict[str, Any]:
 
 
 def get_funnel_stats() -> dict[str, int]:
-    db = get_client()
-    result = db.table("rb_users").select("current_stage").execute()
-    rows = result.data or []
-    counts: dict[str, int] = {
-        "onboarding": 0,
-        "interview": 0,
-        "draft": 0,
-        "exported": 0,
-    }
+    rows = _get("rb_users", {"select": "current_stage"})
+    counts: dict[str, int] = {"onboarding": 0, "interview": 0, "draft": 0, "exported": 0}
     for row in rows:
-        stage = row.get("current_stage", "onboarding") or "onboarding"
-        if stage in counts:
-            counts[stage] += 1
-        else:
-            counts[stage] = counts.get(stage, 0) + 1
+        stage = row.get("current_stage") or "onboarding"
+        counts[stage] = counts.get(stage, 0) + 1
     return counts
 
 
 def get_recent_events(limit: int = 20) -> list[dict]:
-    db = get_client()
-    result = (
-        db.table("rb_events")
-        .select("id, event_type, user_id, metadata, created_at")
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-    )
-    return result.data or []
+    return _get("rb_events", {
+        "select": "id,event_type,user_id,metadata,created_at",
+        "order": "created_at.desc",
+        "limit": limit,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -101,14 +90,10 @@ def get_recent_events(limit: int = 20) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def get_all_users() -> list[dict]:
-    db = get_client()
-    result = (
-        db.table("rb_users")
-        .select("id, telegram_username, current_stage, created_at, last_active_at")
-        .order("created_at", desc=True)
-        .execute()
-    )
-    return result.data or []
+    return _get("rb_users", {
+        "select": "id,telegram_username,current_stage,created_at,last_active_at",
+        "order": "created_at.desc",
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -116,75 +101,35 @@ def get_all_users() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def get_user_by_id(user_id: int) -> dict | None:
-    db = get_client()
-    result = (
-        db.table("rb_users")
-        .select("*")
-        .eq("id", user_id)
-        .limit(1)
-        .execute()
-    )
-    rows = result.data or []
+    rows = _get("rb_users", {"id": f"eq.{user_id}", "limit": 1})
     return rows[0] if rows else None
 
 
 def get_candidate_profile(user_id: int) -> dict | None:
-    db = get_client()
-    result = (
-        db.table("rb_candidate_profiles")
-        .select("*")
-        .eq("user_id", user_id)
-        .limit(1)
-        .execute()
-    )
-    rows = result.data or []
+    rows = _get("rb_candidate_profiles", {"user_id": f"eq.{user_id}", "limit": 1})
     return rows[0] if rows else None
 
 
 def get_work_experiences(profile_id: str) -> list[dict]:
-    db = get_client()
-    result = (
-        db.table("rb_work_experiences")
-        .select("*")
-        .eq("profile_id", profile_id)
-        .order("order_index")
-        .execute()
-    )
-    return result.data or []
+    return _get("rb_work_experiences", {
+        "profile_id": f"eq.{profile_id}",
+        "order": "order_index.asc",
+    })
 
 
 def get_skills(profile_id: str) -> list[dict]:
-    db = get_client()
-    result = (
-        db.table("rb_skills")
-        .select("*")
-        .eq("profile_id", profile_id)
-        .execute()
-    )
-    return result.data or []
+    return _get("rb_skills", {"profile_id": f"eq.{profile_id}"})
 
 
 def get_education(profile_id: str) -> list[dict]:
-    db = get_client()
-    result = (
-        db.table("rb_education")
-        .select("*")
-        .eq("profile_id", profile_id)
-        .execute()
-    )
-    return result.data or []
+    return _get("rb_education", {"profile_id": f"eq.{profile_id}"})
 
 
 def get_user_resumes(user_id: int) -> list[dict]:
-    db = get_client()
-    result = (
-        db.table("rb_resumes")
-        .select("*")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .execute()
-    )
-    return result.data or []
+    return _get("rb_resumes", {
+        "user_id": f"eq.{user_id}",
+        "order": "created_at.desc",
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -192,38 +137,29 @@ def get_user_resumes(user_id: int) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def get_all_resumes() -> list[dict]:
-    db = get_client()
-    result = (
-        db.table("rb_resumes")
-        .select("id, user_id, title, version, created_at, content")
-        .order("created_at", desc=True)
-        .execute()
-    )
-    resumes = result.data or []
+    resumes = _get("rb_resumes", {
+        "select": "id,user_id,title,version,created_at,content",
+        "order": "created_at.desc",
+    })
+    if not resumes:
+        return []
 
-    # Enrich with user info
-    if resumes:
-        user_ids = list({r["user_id"] for r in resumes if r.get("user_id")})
-        users_result = (
-            db.table("rb_users")
-            .select("id, telegram_username")
-            .in_("id", user_ids)
-            .execute()
-        )
-        users_map = {u["id"]: u for u in (users_result.data or [])}
+    user_ids = list({r["user_id"] for r in resumes if r.get("user_id")})
+    ids_param = f"in.({','.join(str(i) for i in user_ids)})"
 
-        profiles_result = (
-            db.table("rb_candidate_profiles")
-            .select("user_id, full_name, desired_position")
-            .in_("user_id", user_ids)
-            .execute()
-        )
-        profiles_map = {p["user_id"]: p for p in (profiles_result.data or [])}
+    users = _get("rb_users", {"id": ids_param, "select": "id,telegram_username"})
+    users_map = {u["id"]: u for u in users}
 
-        for r in resumes:
-            uid = r.get("user_id")
-            r["user"] = users_map.get(uid, {})
-            r["profile"] = profiles_map.get(uid, {})
+    profiles = _get("rb_candidate_profiles", {
+        "user_id": ids_param,
+        "select": "user_id,full_name,desired_position",
+    })
+    profiles_map = {p["user_id"]: p for p in profiles}
+
+    for r in resumes:
+        uid = r.get("user_id")
+        r["user"] = users_map.get(uid, {})
+        r["profile"] = profiles_map.get(uid, {})
 
     return resumes
 
@@ -233,25 +169,14 @@ def get_all_resumes() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def get_resume_by_id(resume_id: str) -> dict | None:
-    db = get_client()
-    result = (
-        db.table("rb_resumes")
-        .select("*")
-        .eq("id", resume_id)
-        .limit(1)
-        .execute()
-    )
-    rows = result.data or []
+    rows = _get("rb_resumes", {"id": f"eq.{resume_id}", "limit": 1})
     if not rows:
         return None
     resume = rows[0]
 
-    # Attach user info
     uid = resume.get("user_id")
     if uid:
-        user = get_user_by_id(uid)
-        resume["user"] = user or {}
-        profile = get_candidate_profile(uid)
-        resume["profile"] = profile or {}
+        resume["user"] = get_user_by_id(uid) or {}
+        resume["profile"] = get_candidate_profile(uid) or {}
 
     return resume
