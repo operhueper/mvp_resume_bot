@@ -137,7 +137,12 @@ async def onboarding_handle_coaching(message: Message, state: FSMContext) -> Non
     wait_msg = await message.answer("Анализирую ваши сильные стороны... 🤖")
     
     try:
-        response = await _chat(prompt, model="gpt-4o-mini", temperature=0.7)
+        response = await _chat(
+            system="Ты профессиональный карьерный коуч и HR-специалист.",
+            user=prompt, 
+            model="gpt-4o-mini", 
+            temperature=0.7
+        )
         await wait_msg.delete()
         await message.answer(f"Вот что я увидел в ваших ответах:\n\n{response}\n\nНапишите ниже должность, которую вы выбираете для этого резюме:")
         await state.set_state(OnboardingStates.waiting_desired_position)
