@@ -45,6 +45,62 @@ TOTAL_STAGES = 6
 # How many times we nudge the user for a quantified achievement before giving up
 MAX_ACHIEVEMENT_NUDGES = 2
 
+# Help trigger keywords (case-insensitive)
+_HELP_KEYWORDS = {"пример", "помогите", "помощь", "не знаю", "?", "help"}
+
+# Stage-specific help examples
+_HELP_EXAMPLES: dict[str, str] = {
+    "summary": (
+        "Вот пример раздела «О себе»:\n\n"
+        "_«Менеджер по продажам с 6-летним опытом в B2B. Специализируюсь на работе с крупными "
+        "корпоративными клиентами. За последние 2 года увеличил объём продаж отдела на 45%. "
+        "Ищу позицию в компании с амбициозными целями роста.»_\n\n"
+        "Теперь напишите о себе:"
+    ),
+    "work_experience_company": (
+        "Например: ООО «Альфа», Яндекс, ИП Иванов И.И.\n\nВведите название компании:"
+    ),
+    "work_experience_role": (
+        "Например: Менеджер по продажам, Senior Python Developer, Руководитель отдела маркетинга\n\n"
+        "Введите Вашу должность:"
+    ),
+    "work_experience_dates": (
+        "Например: январь 2020 — март 2023 или 2019 — по настоящее время\n\nВведите период работы:"
+    ),
+    "work_experience_responsibilities": (
+        "Например:\n"
+        "• Управлял командой из 8 человек\n"
+        "• Вёл переговоры с ключевыми клиентами\n"
+        "• Разрабатывал стратегию продаж на квартал\n\n"
+        "Опишите Ваши обязанности:"
+    ),
+    "work_experience_achievements": (
+        "Например:\n"
+        "• Увеличил выручку отдела на 35% за год\n"
+        "• Сократил цикл сделки с 30 до 18 дней\n"
+        "• Привлёк 12 новых крупных клиентов\n\n"
+        "Опишите Ваши достижения:"
+    ),
+    "skills_input": (
+        "Например: Python, SQL, Jira, управление проектами, Agile, Excel, аналитика данных\n\n"
+        "Введите Ваши навыки через запятую:"
+    ),
+    "education_input": (
+        "Например: МГУ им. Ломоносова, факультет экономики, бакалавр, 2018\n\n"
+        "Введите информацию об образовании:"
+    ),
+    "extras_input": (
+        "Например: Желаемая зарплата от 120 000 ₽, удалённая работа, готов к командировкам раз в квартал\n\n"
+        "Введите дополнительную информацию:"
+    ),
+}
+
+
+def _is_help_request(text: str) -> bool:
+    """Return True if user is asking for help/example."""
+    return text.strip().lower() in _HELP_KEYWORDS
+
+
 # ---------------------------------------------------------------------------
 # Keyboard helpers
 # ---------------------------------------------------------------------------
@@ -78,6 +134,17 @@ def _skill_confirm_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="Навыки верны", callback_data="skills_confirmed"),
                 InlineKeyboardButton(text="Добавить ещё", callback_data="skills_add_more"),
+            ]
+        ]
+    )
+
+
+def _warning_keyboard(continue_data: str, edit_data: str, edit_label: str = "✏️ Дополнить") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=edit_label, callback_data=edit_data),
+                InlineKeyboardButton(text="➡️ Продолжить", callback_data=continue_data),
             ]
         ]
     )
@@ -137,9 +204,9 @@ async def ask_summary(message: Message, state: FSMContext) -> None:
     await state.set_state(InterviewStates.summary)
     await message.answer(
         f"{_stage_label(1)}\n\n"
-        f"Расскажите о себе в 3–5 предложениях: кто вы как специалист, "
+        f"Расскажите о себе в 3–5 предложениях: кто Вы как специалист, "
         f"сколько лет опыта, чем занимаетесь сейчас и что ищете в роли {desired_position}.\n\n"
-        "Это будет раздел «О себе» в вашем резюме."
+        "Это будет раздел «О себе» в Вашем резюме."
     )
 
 
@@ -150,10 +217,31 @@ async def handle_summary(message: Message, state: FSMContext) -> None:
         await message.answer("Пожалуйста, напишите текст ответа.")
         return
 
+    if _is_help_request(text):
+        await message.answer(_HELP_EXAMPLES["summary"])
+        return
+
     if _is_off_topic(text):
         await _redirect_off_topic(message, state, 1)
         return
 
+    # Quality warning if too short
+    if len(text.split()) < 25:
+        await state.update_data(_pending_summary=text)
+        await message.answer(
+            "Раздел «О себе» выглядит кратким. Рекомендуем 3–5 предложений, "
+            "чтобы привлечь внимание работодателя.",
+            reply_markup=_warning_keyboard(
+                continue_data="summary_warning_continue",
+                edit_data="summary_warning_edit",
+            ),
+        )
+        return
+
+    await _save_summary(message, state, text)
+
+
+async def _save_summary(message: Message, state: FSMContext, text: str) -> None:
     await state.update_data(summary=text, work_experiences=[], achievement_nudges=0, current_job_index=0)
     data = await state.get_data()
     await _persist_state(state, data["user_id"])
@@ -161,6 +249,23 @@ async def handle_summary(message: Message, state: FSMContext) -> None:
     await message.answer(
         f"Раздел «О себе»:\n\n{text}",
         reply_markup=_yes_no_keyboard("summary_ok", "summary_redo"),
+    )
+
+
+@router.callback_query(F.data == "summary_warning_continue")
+async def cb_summary_warning_continue(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    text = data.get("_pending_summary", "")
+    await _save_summary(callback.message, state, text)
+
+
+@router.callback_query(F.data == "summary_warning_edit")
+async def cb_summary_warning_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(InterviewStates.summary)
+    await callback.message.answer(
+        "Расскажите о себе подробнее — 3–5 предложений о Вашем опыте и целях:"
     )
 
 
@@ -179,7 +284,7 @@ async def cb_summary_redo(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(InterviewStates.summary)
     await callback.message.answer(
-        "Хорошо. Расскажите о себе заново — 3–5 предложений о вашем опыте и целях."
+        "Хорошо. Расскажите о себе заново — 3–5 предложений о Вашем опыте и целях."
     )
 
 
@@ -194,13 +299,16 @@ async def handle_we_company(message: Message, state: FSMContext) -> None:
     if not text:
         await message.answer("Введите название компании.")
         return
+    if _is_help_request(text):
+        await message.answer(_HELP_EXAMPLES["work_experience_company"])
+        return
     if _is_off_topic(text):
         await _redirect_off_topic(message, state, 2)
         return
 
     await state.update_data(current_company=text, achievement_nudges=0)
     await state.set_state(InterviewStates.work_experience_role)
-    await message.answer("Какую должность вы занимали в этой компании?")
+    await message.answer("Какую должность Вы занимали в этой компании?")
 
 
 @router.message(InterviewStates.work_experience_role)
@@ -208,6 +316,9 @@ async def handle_we_role(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if not text:
         await message.answer("Введите название должности.")
+        return
+    if _is_help_request(text):
+        await message.answer(_HELP_EXAMPLES["work_experience_role"])
         return
 
     await state.update_data(current_role=text)
@@ -223,11 +334,14 @@ async def handle_we_dates(message: Message, state: FSMContext) -> None:
     if not text:
         await message.answer("Введите период работы.")
         return
+    if _is_help_request(text):
+        await message.answer(_HELP_EXAMPLES["work_experience_dates"])
+        return
 
     await state.update_data(current_dates=text)
     await state.set_state(InterviewStates.work_experience_responsibilities)
     await message.answer(
-        "Опишите ваши основные обязанности на этой позиции. "
+        "Опишите Ваши основные обязанности на этой позиции. "
         "Перечислите 3–6 ключевых задач."
     )
 
@@ -236,14 +350,50 @@ async def handle_we_dates(message: Message, state: FSMContext) -> None:
 async def handle_we_responsibilities(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if not text:
-        await message.answer("Пожалуйста, опишите ваши обязанности.")
+        await message.answer("Пожалуйста, опишите Ваши обязанности.")
+        return
+    if _is_help_request(text):
+        await message.answer(_HELP_EXAMPLES["work_experience_responsibilities"])
         return
 
+    # Quality warning if too short
+    if len(text.split()) < 15:
+        await state.update_data(_pending_responsibilities=text)
+        await message.answer(
+            "Обязанности описаны кратко. Постарайтесь перечислить 3–6 конкретных задач.",
+            reply_markup=_warning_keyboard(
+                continue_data="responsibilities_warning_continue",
+                edit_data="responsibilities_warning_edit",
+            ),
+        )
+        return
+
+    await _save_responsibilities(message, state, text)
+
+
+async def _save_responsibilities(message: Message, state: FSMContext, text: str) -> None:
     await state.update_data(current_responsibilities=text)
     await state.set_state(InterviewStates.work_experience_achievements)
     await message.answer(
-        "Какие результаты вы достигли на этой позиции? "
+        "Какие результаты Вы достигли на этой позиции? "
         "Постарайтесь упомянуть конкретные достижения."
+    )
+
+
+@router.callback_query(F.data == "responsibilities_warning_continue")
+async def cb_responsibilities_warning_continue(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    text = data.get("_pending_responsibilities", "")
+    await _save_responsibilities(callback.message, state, text)
+
+
+@router.callback_query(F.data == "responsibilities_warning_edit")
+async def cb_responsibilities_warning_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(InterviewStates.work_experience_responsibilities)
+    await callback.message.answer(
+        "Перечислите 3–6 ключевых задач на этой позиции подробнее:"
     )
 
 
@@ -251,7 +401,10 @@ async def handle_we_responsibilities(message: Message, state: FSMContext) -> Non
 async def handle_we_achievements(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if not text:
-        await message.answer("Пожалуйста, опишите ваши достижения или напишите «нет».")
+        await message.answer("Пожалуйста, опишите Ваши достижения или напишите «нет».")
+        return
+    if _is_help_request(text):
+        await message.answer(_HELP_EXAMPLES["work_experience_achievements"])
         return
 
     data = await state.get_data()
@@ -265,9 +418,9 @@ async def handle_we_achievements(message: Message, state: FSMContext) -> None:
     if not has_numbers and not is_declined and nudges < MAX_ACHIEVEMENT_NUDGES:
         nudges += 1
         await state.update_data(achievement_nudges=nudges)
-        
+
         from bot.services.ai_service import clarify_achievement
-        
+
         wait_msg = await message.answer("Анализирую ответ... 🤖")
         try:
             ai_question = await clarify_achievement(text, nudges)
@@ -278,17 +431,29 @@ async def handle_we_achievements(message: Message, state: FSMContext) -> None:
                 await message.answer("Хорошо, запишем как есть. Переходим к подтверждению блока.")
                 await _show_we_block_for_confirmation(message, state)
                 return
-                
-            await message.answer(ai_question)
+
+            # Enhanced nudge message for attempt 2
+            if nudges == 2:
+                await message.answer(
+                    "Отличный результат! Можете уточнить цифры? Это сделает резюме намного сильнее.\n\n"
+                    "Например:\n"
+                    "• На сколько % вырос показатель?\n"
+                    "• За какой период достигнут результат?\n"
+                    "• Для скольких клиентов / пользователей?\n\n"
+                    "Может быть: на 15%? на 25%? на 30%? Вы помните точнее?"
+                )
+            else:
+                await message.answer(ai_question)
             return
         except Exception as e:
             logger.error(f"Error AI clarify: {e}")
             await wait_msg.delete()
-            
+
             # Fallback to hardcoded
             if nudges == 1:
                 await message.answer(
-                    "Не могли бы вы добавить конкретные цифры к этому результату? На сколько процентов/штук/часов вы улучшили показатели?"
+                    "Не могли бы Вы добавить конкретные цифры к этому результату? "
+                    "На сколько процентов/штук/часов Вы улучшили показатели?"
                 )
             else:
                 await state.update_data(current_achievements=text)
@@ -384,23 +549,45 @@ async def _start_skills_stage(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     desired_position = data.get("desired_position", "")
 
-    # Try to get AI suggestions if ai_service is available
-    suggestions_text = ""
+    # Step 1: Try to get skills from HH vacancies
+    skills_list: list[str] = []
+    source = ""
     try:
-        from bot.services.ai_service import suggest_skills
-        suggestions = await suggest_skills(desired_position)
-        if suggestions:
-            suggestions_text = "\n\nВозможные навыки для вашей специализации:\n" + ", ".join(suggestions)
-    except Exception:
-        pass
+        from bot.services.hh_service import get_skills_for_position
+        hh_skills = await get_skills_for_position(desired_position)
+        if len(hh_skills) >= 5:
+            skills_list = hh_skills
+            source = "hh"
+    except Exception as exc:
+        logger.warning("HH skills fetch failed: %s", exc)
+
+    # Step 2: Fall back to AI suggestions if HH returned too few
+    if len(skills_list) < 5:
+        try:
+            from bot.services.ai_service import suggest_skills
+            ai_skills = await suggest_skills(desired_position)
+            if ai_skills:
+                skills_list = ai_skills
+                source = "ai"
+        except Exception as exc:
+            logger.warning("AI skill suggestions failed: %s", exc)
 
     await state.set_state(InterviewStates.skills_input)
-    await message.answer(
-        f"{_stage_label(4)}\n\n"
-        f"Перечислите ваши ключевые навыки через запятую. "
-        f"Укажите как профессиональные, так и инструментальные навыки."
-        f"{suggestions_text}"
-    )
+
+    if skills_list:
+        numbered = "\n".join(f"{i+1}. {s}" for i, s in enumerate(skills_list))
+        await message.answer(
+            f"{_stage_label(4)}\n\n"
+            f"Вот навыки, которые часто встречаются для этой роли:\n{numbered}\n\n"
+            "Введите навыки, которыми Вы владеете (через запятую), или добавьте свои:"
+        )
+    else:
+        # Step 3: Manual fallback
+        await message.answer(
+            f"{_stage_label(4)}\n\n"
+            "Перечислите Ваши ключевые навыки через запятую. "
+            "Укажите как профессиональные, так и инструментальные навыки."
+        )
 
 
 @router.message(InterviewStates.skills_input)
@@ -409,15 +596,53 @@ async def handle_skills(message: Message, state: FSMContext) -> None:
     if not text:
         await message.answer("Введите навыки через запятую.")
         return
+    if _is_help_request(text):
+        await message.answer(_HELP_EXAMPLES["skills_input"])
+        return
     if _is_off_topic(text):
         await _redirect_off_topic(message, state, 4)
         return
 
     skills = [s.strip() for s in text.split(",") if s.strip()]
+
+    # Quality warning if too few skills
+    if len(skills) < 5:
+        await state.update_data(_pending_skills=skills)
+        await message.answer(
+            "Указано мало навыков. Для сильного резюме рекомендуется 6–10. Хотите добавить ещё?",
+            reply_markup=_warning_keyboard(
+                continue_data="skills_warning_continue",
+                edit_data="skills_warning_edit",
+                edit_label="➕ Добавить навыки",
+            ),
+        )
+        return
+
+    await _save_skills(message, state, skills)
+
+
+async def _save_skills(message: Message, state: FSMContext, skills: list[str]) -> None:
     await state.update_data(skills=skills)
     await message.answer(
         f"Навыки:\n{', '.join(skills)}",
         reply_markup=_skill_confirm_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "skills_warning_continue")
+async def cb_skills_warning_continue(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    skills = data.get("_pending_skills", [])
+    await _save_skills(callback.message, state, skills)
+
+
+@router.callback_query(F.data == "skills_warning_edit")
+async def cb_skills_warning_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.set_state(InterviewStates.skills_input)
+    await callback.message.answer(
+        "Добавьте навыки через запятую (введите их все снова или только дополнения):"
     )
 
 
@@ -440,7 +665,7 @@ async def cb_skills_confirmed(callback: CallbackQuery, state: FSMContext) -> Non
     await state.set_state(InterviewStates.education_input)
     await callback.message.answer(
         f"{_stage_label(5)}\n\n"
-        "Укажите ваше образование: учебное заведение, специальность и год окончания."
+        "Укажите Ваше образование: учебное заведение, специальность и год окончания."
     )
 
 
@@ -463,7 +688,10 @@ async def cb_skills_add_more(callback: CallbackQuery, state: FSMContext) -> None
 async def handle_education(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if not text:
-        await message.answer("Пожалуйста, опишите ваше образование или напишите «нет».")
+        await message.answer("Пожалуйста, опишите Ваше образование или напишите «нет».")
+        return
+    if _is_help_request(text):
+        await message.answer(_HELP_EXAMPLES["education_input"])
         return
     if _is_off_topic(text):
         await _redirect_off_topic(message, state, 5)
@@ -504,6 +732,9 @@ async def handle_extras(message: Message, state: FSMContext) -> None:
     if not text:
         await message.answer("Пожалуйста, ответьте на вопрос или напишите «нет».")
         return
+    if _is_help_request(text):
+        await message.answer(_HELP_EXAMPLES["extras_input"])
+        return
     if _is_off_topic(text):
         await _redirect_off_topic(message, state, 6)
         return
@@ -525,12 +756,50 @@ async def handle_extras(message: Message, state: FSMContext) -> None:
 
 
 async def _generate_resume(message: Message, state: FSMContext) -> None:
+    from bot.handlers.start import main_keyboard
+
     data = await state.get_data()
     user_id = data["user_id"]
 
+    # Validate required sections before generating
+    missing = []
+    if not data.get("full_name"):
+        missing.append("имя")
+    if not data.get("desired_position"):
+        missing.append("желаемая должность")
+    if not data.get("summary"):
+        missing.append("раздел «О себе»")
+    if not data.get("work_experiences"):
+        missing.append("опыт работы")
+    if not data.get("skills"):
+        missing.append("навыки")
+    if not data.get("city"):
+        missing.append("город")
+
+    education = data.get("education", "")
+    if not education or education.lower() in ["", "нет"]:
+        await message.answer("💡 Образование не указано — рекомендуем добавить для полноты резюме.")
+
+    if missing:
+        await message.answer(
+            f"⚠️ Для создания резюме необходимо заполнить: {', '.join(missing)}. "
+            "Пожалуйста, пройдите соответствующие этапы."
+        )
+        return
+
+    # Detect gender for correct verb forms in О СЕБЕ
+    gender = "male"
+    full_name = data.get("full_name", "")
+    if full_name:
+        try:
+            from bot.services.ai_service import detect_gender
+            gender = await detect_gender(full_name)
+        except Exception as exc:
+            logger.warning("Gender detection failed, defaulting to male: %s", exc)
+
     try:
         from bot.services.ai_service import generate_resume_text
-        resume_text = await generate_resume_text(data)
+        resume_text = await generate_resume_text(data, gender=gender)
     except Exception as exc:
         logger.error("AI resume generation failed: %s", exc)
         resume_text = _build_plain_resume(data)
@@ -559,8 +828,12 @@ async def _generate_resume(message: Message, state: FSMContext) -> None:
         "«короче» — сделать резюме короче\n"
         "«формальнее» — более официальный стиль\n"
         "«перепиши блок» — переписать конкретный раздел\n"
-        "«добавь навык» — добавить навык\n\n"
-        "Или отправьте /export, чтобы получить финальную версию."
+        "«добавь навык» — добавить навык",
+        reply_markup=main_keyboard(),
+    )
+    await message.answer(
+        "📋 Не забудьте добавить контактные данные (email и телефон) в резюме самостоятельно — "
+        "работодатели обязательно должны знать, как с Вами связаться."
     )
 
 
@@ -570,15 +843,12 @@ def _build_plain_resume(data: dict) -> str:
 
     name = data.get("full_name", "")
     position = data.get("desired_position", "")
-    contacts = data.get("contacts", "")
     city = data.get("city", "")
 
     if name:
         lines.append(name)
     if position:
         lines.append(position)
-    if contacts:
-        lines.append(contacts)
     if city:
         lines.append(city)
 

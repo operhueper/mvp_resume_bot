@@ -97,7 +97,13 @@ async def handle_viewing_draft(message: Message, state: FSMContext) -> None:
     """
     While the user is in viewing_draft state, accept text editing commands.
     """
+    from bot.handlers.start import main_keyboard
+
     text = (message.text or "").strip().lower()
+
+    # Ignore persistent keyboard button presses — they are handled by start.py
+    if text in ("📄 моё резюме", "❓ помощь", "🔄 начать заново", "🗑 удалить профиль"):
+        return
 
     if "короче" in text:
         await _apply_edit_command(message, state, "shorter")
@@ -127,7 +133,8 @@ async def handle_viewing_draft(message: Message, state: FSMContext) -> None:
         )
     else:
         await message.answer(
-            "Резюме не найдено. Пройдите интервью, чтобы создать резюме (/start)."
+            "Резюме не найдено. Пройдите интервью, чтобы создать резюме.",
+            reply_markup=main_keyboard(),
         )
 
 
@@ -175,6 +182,8 @@ async def cb_resume_add_skill(callback: CallbackQuery, state: FSMContext) -> Non
 
 @router.message(ResumeStates.editing)
 async def handle_editing(message: Message, state: FSMContext) -> None:
+    from bot.handlers.start import main_keyboard
+
     text = (message.text or "").strip()
     if not text:
         await message.answer("Пожалуйста, введите текст.")

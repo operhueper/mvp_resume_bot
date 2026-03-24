@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Дашборд — Resume Bot Admin{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Дашборд</h1>
+    <p class="page-subtitle">Обзор активности бота</p>
+  </div>
+</div>
+
+<!-- Stats cards -->
+<div class="stats-grid">
+  <div class="stat-card stat-card--blue">
+    <div class="stat-label">Всего пользователей</div>
+    <div class="stat-value">{{ stats.total_users }}</div>
+    <div class="stat-sub">за всё время</div>
+  </div>
+  <div class="stat-card stat-card--green">
+    <div class="stat-label">Пользователи сегодня</div>
+    <div class="stat-value">{{ stats.users_today }}</div>
+    <div class="stat-sub">зарегистрированы сегодня</div>
+  </div>
+  <div class="stat-card stat-card--purple">
+    <div class="stat-label">Резюме создано</div>
+    <div class="stat-value">{{ stats.total_resumes }}</div>
+    <div class="stat-sub">за всё время</div>
+  </div>
+  <div class="stat-card stat-card--amber">
+    <div class="stat-label">Резюме за неделю</div>
+    <div class="stat-value">{{ stats.resumes_this_week }}</div>
+    <div class="stat-sub">за последние 7 дней</div>
+  </div>
+</div>
+
+<!-- Funnel -->
+<div class="card" style="margin-bottom: 24px;">
+  <div class="card-header">
+    <h2 class="card-title">Воронка конверсии</h2>
+  </div>
+  <div class="card-body">
+    <div class="funnel-container">
+      {% for step in funnel_steps %}
+      <div class="funnel-step">
+        <div class="funnel-label-top">{{ step.count }}</div>
+        <div class="funnel-bar-wrap">
+          <div
+            class="funnel-bar"
+            style="width: {{ step.bar_pct }}%; background: {{ step.color }};"
+            title="{{ step.label }}: {{ step.count }} ({{ step.pct }}%)"
+          ></div>
+        </div>
+        <div class="funnel-meta">
+          <span class="funnel-stage">{{ step.label }}</span>
+          <span class="funnel-pct">{{ step.pct }}%</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<!-- Stage breakdown -->
+<div class="card" style="margin-bottom: 24px;">
+  <div class="card-header">
+    <h2 class="card-title">Текущие стадии</h2>
+  </div>
+  <div class="card-body" style="padding-bottom: 8px;">
+    <div class="stages-grid">
+      <div class="stage-item">
+        <span class="stage-badge stage-onboarding">Онбординг</span>
+        <span class="stage-count">{{ funnel.onboarding or 0 }}</span>
+      </div>
+      <div class="stage-item">
+        <span class="stage-badge stage-interview">Интервью</span>
+        <span class="stage-count">{{ funnel.interview or 0 }}</span>
+      </div>
+      <div class="stage-item">
+        <span class="stage-badge stage-draft">Черновик</span>
+        <span class="stage-count">{{ funnel.draft or 0 }}</span>
+      </div>
+      <div class="stage-item">
+        <span class="stage-badge stage-exported">Экспорт</span>
+        <span class="stage-count">{{ funnel.exported or 0 }}</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Recent events -->
+<div class="card">
+  <div class="card-header">
+    <h2 class="card-title">Последние события</h2>
+    <span class="card-subtitle">{{ events|length }} записей</span>
+  </div>
+  <div class="table-responsive">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Время</th>
+          <th>Тип события</th>
+          <th>User ID</th>
+          <th>Детали</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if events %}
+          {% for ev in events %}
+          <tr>
+            <td class="cell-muted cell-nowrap">{{ ev.created_at | time_ago }}</td>
+            <td><span class="event-badge event-{{ ev.event_type | event_badge_class }}">{{ ev.event_type }}</span></td>
+            <td>
+              {% if ev.user_id %}
+                <a href="/users/{{ ev.user_id }}" class="table-link">{{ ev.user_id }}</a>
+              {% else %}
+                <span class="cell-muted">—</span>
+              {% endif %}
+            </td>
+            <td class="cell-meta">{{ ev.metadata | string | truncate_text(120) }}</td>
+          </tr>
+          {% endfor %}
+        {% else %}
+          <tr>
+            <td colspan="4" class="empty-row">Событий пока нет</td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

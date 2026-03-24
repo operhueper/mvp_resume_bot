@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Резюме — Resume Bot Admin{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Резюме</h1>
+    <p class="page-subtitle">{{ resumes|length }} резюме в базе</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Пользователь</th>
+          <th>Должность</th>
+          <th>Версия</th>
+          <th>Создано</th>
+          <th>Превью</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if resumes %}
+          {% for r in resumes %}
+          <tr class="clickable-row" onclick="location.href='/resumes/{{ r.id }}'">
+            <td>
+              <div>
+                {% if r.profile and r.profile.full_name %}
+                  <a href="/users/{{ r.user_id }}" class="table-link" onclick="event.stopPropagation()">{{ r.profile.full_name }}</a>
+                {% else %}
+                  <a href="/users/{{ r.user_id }}" class="table-link mono" onclick="event.stopPropagation()">{{ r.user_id }}</a>
+                {% endif %}
+                {% if r.user and r.user.telegram_username %}
+                  <div class="cell-muted" style="font-size: 12px;">@{{ r.user.telegram_username }}</div>
+                {% endif %}
+              </div>
+            </td>
+            <td>
+              {% if r.profile and r.profile.desired_position %}
+                {{ r.profile.desired_position }}
+              {% elif r.title %}
+                {{ r.title }}
+              {% else %}
+                <span class="cell-muted">—</span>
+              {% endif %}
+            </td>
+            <td>
+              <span class="version-badge">v{{ r.version or 1 }}</span>
+            </td>
+            <td class="cell-muted cell-nowrap">{{ r.created_at | format_dt }}</td>
+            <td class="cell-preview">
+              <a href="/resumes/{{ r.id }}" class="table-link" onclick="event.stopPropagation()">
+                {{ r.content | truncate_text(100) if r.content else '—' }}
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        {% else %}
+          <tr>
+            <td colspan="5" class="empty-row">Резюме пока нет</td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

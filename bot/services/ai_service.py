@@ -43,20 +43,32 @@ _MAX_RETRIES = 2
 async def _chat(
     *,
     model: str,
-    system: str,
-    user: str,
+    messages: list[dict] | None = None,
+    system: str | None = None,
+    user: str | None = None,
     temperature: float = 0.4,
     max_tokens: int = 2000,
     response_format: dict[str, str] | None = None,
 ) -> str:
-    """Send a chat completion request with up to _MAX_RETRIES retries on transient errors."""
+    """Send a chat completion request with up to _MAX_RETRIES retries on transient errors.
+
+    Accepts either:
+      - messages: explicit list of message dicts
+      - system + user: shorthand that builds the messages list
+    """
     client = _get_client()
-    kwargs: dict[str, Any] = dict(
-        model=model,
-        messages=[
+
+    if messages is None:
+        if system is None or user is None:
+            raise ValueError("Either 'messages' or both 'system' and 'user' must be provided.")
+        messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
-        ],
+        ]
+
+    kwargs: dict[str, Any] = dict(
+        model=model,
+        messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
     )
@@ -134,6 +146,21 @@ def _parse_json_dict(raw: str) -> dict:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+async def detect_gender(full_name: str) -> str:
+    """Returns 'male' or 'female' based on Russian full name."""
+    response = await _chat(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Определи пол человека по имени. Отвечай только одним словом: male или female."},
+            {"role": "user", "content": full_name}
+        ],
+        max_tokens=10,
+        temperature=0,
+    )
+    result = response.strip().lower()
+    return "female" if "female" in result else "male"
+
 
 async def get_skill_suggestions(profession: str, existing_skills: list[str]) -> list[str]:
     """Return 10-15 relevant tools/technologies for *profession*.
@@ -251,7 +278,8 @@ async def evaluate_parsed_resume(profile_data: dict) -> str:
         "1. Lack of numbers/metrics in work experience. "
         "2. Vague responsibilities. "
         "3. Missing key skills. "
-        "Write a short, friendly message in Russian. Praise what's good, but clearly point out the problems. "
+        "Write a short, friendly message in Russian using formal 'Вы' address. "
+        "Praise what's good, but clearly point out the problems. "
         "Keep it under 4 sentences. Do NOT rewrite the resume, just give the critique."
     )
     user = f"Parsed resume data:\n\n{json.dumps(profile_data, ensure_ascii=False)}"
@@ -264,21 +292,38 @@ async def evaluate_parsed_resume(profile_data: dict) -> str:
     )
 
 
-_RESUME_SYSTEM_PROMPT = """\
+def _build_resume_system_prompt(gender: str = "male") -> str:
+    """Build the resume generation system prompt with gender-appropriate О СЕБЕ instructions."""
+    gender_note = ""
+    if gender == "female":
+        gender_note = (
+            "\nGENDER NOTE for О СЕБЕ section:\n"
+            "- Use feminine adjective forms for the candidate: "
+            "«Опытная специалист», «Ответственная», «Квалифицированная», etc.\n"
+            "- Action verbs in О СЕБЕ should also be feminine where applicable.\n"
+        )
+    else:
+        gender_note = (
+            "\nGENDER NOTE for О СЕБЕ section:\n"
+            "- Use masculine adjective forms for the candidate: "
+            "«Опытный специалист», «Ответственный», «Квалифицированный», etc.\n"
+        )
+
+    return f"""\
 You are a professional Russian-language resume writer specialising in hh.ru.
 Your task: write a complete, ATS-optimised resume for the given position.
 
 STRICT QUALITY RULES — follow all of them without exception:
 
 STRUCTURE (in this exact order):
-1. SUMMARY — 3 to 5 sentences. Hook the hiring manager. Mention years of experience,
+1. О СЕБЕ — 3 to 5 sentences. Hook the hiring manager. Mention years of experience,
    core expertise, and 1-2 key achievements with numbers.
 2. ОПЫТ РАБОТЫ — reverse-chronological. For each role:
    - Header: Company name | Position | Date range (MM.YYYY – MM.YYYY or "по настоящее время")
    - 3 to 6 bullet points per role
 3. КЛЮЧЕВЫЕ НАВЫКИ — comma-separated list, grouped by category if useful
 4. ОБРАЗОВАНИЕ — institution, degree, year
-
+{gender_note}
 BULLET POINT RULES (most important):
 - Every bullet: Action verb (past tense Russian) + Task/scope + Measurable result + Tools used
 - TARGET: ≥70% of bullets must contain a specific number, %, time period, or money amount
@@ -304,12 +349,13 @@ LANGUAGE:
 """
 
 
-async def generate_resume(profile_data: dict, position_title: str) -> str:
+async def generate_resume(profile_data: dict, position_title: str, gender: str = "male") -> str:
     """Generate a full professional resume text ready for hh.ru.
 
-    Follows strict quality rules defined in _RESUME_SYSTEM_PROMPT.
+    Follows strict quality rules defined in _build_resume_system_prompt().
     Returns formatted plain text.
     """
+    system_prompt = _build_resume_system_prompt(gender)
     user = (
         f"Desired position: {position_title}\n\n"
         f"Candidate profile data:\n{json.dumps(profile_data, ensure_ascii=False, indent=2)}\n\n"
@@ -319,7 +365,7 @@ async def generate_resume(profile_data: dict, position_title: str) -> str:
     )
     return await _chat(
         model="gpt-4o",
-        system=_RESUME_SYSTEM_PROMPT,
+        system=system_prompt,
         user=user,
         temperature=0.5,
         max_tokens=2500,
@@ -342,6 +388,7 @@ async def improve_resume(current_resume: str, instruction: str) -> str:
         "- Keep strong action verbs (Увеличил, Разработал, Внедрил, etc.).\n"
         "- Remove vague bullets if found.\n"
         "- Keep the resume in Russian, formal tone.\n"
+        "- The О СЕБЕ section header must remain 'О СЕБЕ' (not SUMMARY).\n"
         "- Return ONLY the improved resume text, no commentary."
     )
     user = (
@@ -372,15 +419,16 @@ async def clarify_achievement(vague_text: str, attempt: int) -> str:
     if attempt == 1:
         system = (
             "You are a resume coach. The user described a work achievement in vague terms. "
-            "Ask ONE short, friendly question in Russian to find out the specific result or impact. "
+            "Ask ONE short, friendly question in Russian using formal 'Вы' address to find out "
+            "the specific result or impact. "
             "Keep the question under 2 sentences. Return only the question."
         )
         user = f"Vague achievement: {vague_text}\n\nAsk a clarifying question to get a measurable result."
     else:  # attempt == 2
         system = (
             "You are a resume coach. The user still hasn't given specific numbers for their achievement. "
-            "Ask a follow-up question in Russian that suggests concrete formats they could use: "
-            "percentages, absolute numbers, time saved, money saved/earned, team size, etc. "
+            "Ask a follow-up question in Russian using formal 'Вы' address that suggests concrete formats "
+            "they could use: percentages, absolute numbers, time saved, money saved/earned, team size, etc. "
             "Give 2-3 specific examples as options. Keep it friendly and under 3 sentences. "
             "Return only the question."
         )
@@ -408,14 +456,13 @@ async def suggest_skills(profession: str) -> list[str]:
     return await get_skill_suggestions(profession, existing_skills=[])
 
 
-async def generate_resume_text(interview_data: dict) -> str:
+async def generate_resume_text(interview_data: dict, gender: str = "male") -> str:
     """Build a full resume from raw FSM interview data dict.
 
     Assembles a profile_data dict compatible with generate_resume() and calls it.
     """
     profile_data = {
         "name": interview_data.get("full_name", ""),
-        "contacts": interview_data.get("contacts", ""),
         "city": interview_data.get("city", ""),
         "summary": interview_data.get("summary", ""),
         "work_experiences": interview_data.get("work_experiences", []),
@@ -424,7 +471,7 @@ async def generate_resume_text(interview_data: dict) -> str:
         "extras": interview_data.get("extras", ""),
     }
     position_title = interview_data.get("desired_position", "Специалист")
-    return await generate_resume(profile_data, position_title)
+    return await generate_resume(profile_data, position_title, gender=gender)
 
 
 async def edit_resume(current_content: str, command: str, user_input: str) -> str:

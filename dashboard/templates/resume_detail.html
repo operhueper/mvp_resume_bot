@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Резюме — Resume Bot Admin{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div class="page-header-back">
+    <a href="/resumes" class="back-link">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="15 18 9 12 15 6"/>
+      </svg>
+      Все резюме
+    </a>
+    <h1 class="page-title">{{ resume.title or 'Резюме' }}</h1>
+    <p class="page-subtitle">
+      Версия {{ resume.version or 1 }} &middot; {{ resume.created_at | format_dt }}
+    </p>
+  </div>
+</div>
+
+<div class="resume-detail-layout">
+
+  <!-- Resume content -->
+  <div class="resume-content-col">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Текст резюме</h2>
+      </div>
+      <div class="card-body">
+        <pre class="resume-full-text">{{ resume.content or 'Содержимое отсутствует' }}</pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sidebar with user info -->
+  <div class="resume-sidebar-col">
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Пользователь</h2>
+      </div>
+      <div class="card-body">
+        <div class="info-grid">
+          {% if resume.profile and resume.profile.full_name %}
+          <div class="info-row">
+            <span class="info-label">Имя</span>
+            <span class="info-value">{{ resume.profile.full_name }}</span>
+          </div>
+          {% endif %}
+          <div class="info-row">
+            <span class="info-label">Telegram ID</span>
+            <span class="info-value">
+              <a href="/users/{{ resume.user_id }}" class="table-link mono">{{ resume.user_id }}</a>
+            </span>
+          </div>
+          {% if resume.user and resume.user.telegram_username %}
+          <div class="info-row">
+            <span class="info-label">Username</span>
+            <span class="info-value">@{{ resume.user.telegram_username }}</span>
+          </div>
+          {% endif %}
+          {% if resume.profile and resume.profile.desired_position %}
+          <div class="info-row">
+            <span class="info-label">Должность</span>
+            <span class="info-value">{{ resume.profile.desired_position }}</span>
+          </div>
+          {% endif %}
+          {% if resume.profile and resume.profile.city %}
+          <div class="info-row">
+            <span class="info-label">Город</span>
+            <span class="info-value">{{ resume.profile.city }}</span>
+          </div>
+          {% endif %}
+        </div>
+        <a href="/users/{{ resume.user_id }}" class="btn-secondary" style="margin-top: 16px; display: inline-block;">
+          Профиль пользователя →
+        </a>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 16px;">
+      <div class="card-header">
+        <h2 class="card-title">Метаданные</h2>
+      </div>
+      <div class="card-body">
+        <div class="info-grid">
+          <div class="info-row">
+            <span class="info-label">ID резюме</span>
+            <span class="info-value mono" style="font-size: 11px;">{{ resume.id }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Версия</span>
+            <span class="info-value"><span class="version-badge">v{{ resume.version or 1 }}</span></span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Создано</span>
+            <span class="info-value">{{ resume.created_at | format_dt }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Обновлено</span>
+            <span class="info-value">{{ resume.updated_at | format_dt }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

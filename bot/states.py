@@ -6,7 +6,7 @@ class OnboardingStates(StatesGroup):
     coaching_questions = State()
     waiting_desired_position = State()
     waiting_name = State()
-    waiting_contacts = State()   # email + phone in one message or separate
+    # waiting_contacts removed — contacts collected manually by user after resume
     waiting_city = State()
     upload_resume_prompt = State()
     processing_upload = State()

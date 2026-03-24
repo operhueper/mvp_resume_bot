@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+{% block title %}Пользователь {{ user.id }} — Resume Bot Admin{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div class="page-header-back">
+    <a href="/users" class="back-link">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="15 18 9 12 15 6"/>
+      </svg>
+      Все пользователи
+    </a>
+    <h1 class="page-title">
+      {% if user.telegram_username %}@{{ user.telegram_username }}{% else %}Пользователь {{ user.id }}{% endif %}
+    </h1>
+    <p class="page-subtitle">Telegram ID: <span class="mono">{{ user.id }}</span></p>
+  </div>
+</div>
+
+<div class="detail-layout">
+  <div class="detail-main">
+
+    <!-- Basic info -->
+    <div class="card" style="margin-bottom: 20px;">
+      <div class="card-header">
+        <h2 class="card-title">Основная информация</h2>
+        <span class="stage-badge stage-{{ user.current_stage }}">{{ user.current_stage | stage_label }}</span>
+      </div>
+      <div class="card-body">
+        <div class="info-grid">
+          <div class="info-row">
+            <span class="info-label">Telegram ID</span>
+            <span class="info-value mono">{{ user.id }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Username</span>
+            <span class="info-value">{% if user.telegram_username %}@{{ user.telegram_username }}{% else %}—{% endif %}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Стадия</span>
+            <span class="info-value">{{ user.current_stage | stage_label }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Зарегистрирован</span>
+            <span class="info-value">{{ user.created_at | format_dt }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Последняя активность</span>
+            <span class="info-value">{{ user.last_active_at | format_dt }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Profile -->
+    {% if profile %}
+    <div class="card" style="margin-bottom: 20px;">
+      <div class="card-header">
+        <h2 class="card-title">Профиль кандидата</h2>
+      </div>
+      <div class="card-body">
+        <div class="info-grid">
+          <div class="info-row">
+            <span class="info-label">Полное имя</span>
+            <span class="info-value">{{ profile.full_name or '—' }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Желаемая должность</span>
+            <span class="info-value">{{ profile.desired_position or '—' }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Город</span>
+            <span class="info-value">{{ profile.city or '—' }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Контакты</span>
+            <span class="info-value">
+              {% if profile.raw_data and profile.raw_data.contacts %}
+                {{ profile.raw_data.contacts }}
+              {% elif profile.email or profile.phone %}
+                {{ profile.email or '' }}{% if profile.email and profile.phone %} / {% endif %}{{ profile.phone or '' }}
+              {% else %}
+                —
+              {% endif %}
+            </span>
+          </div>
+          {% if profile.summary %}
+          <div class="info-row info-row--full">
+            <span class="info-label">Саммари</span>
+            <span class="info-value">{{ profile.summary }}</span>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Work experiences -->
+    {% if work_experiences %}
+    <div class="card" style="margin-bottom: 20px;">
+      <div class="card-header">
+        <h2 class="card-title">Опыт работы</h2>
+        <span class="card-subtitle">{{ work_experiences|length }} записей</span>
+      </div>
+      <div class="card-body" style="padding: 0;">
+        {% for job in work_experiences %}
+        <div class="job-item {% if not loop.last %}job-item--border{% endif %}">
+          <div class="job-header">
+            <div>
+              <div class="job-title">{{ job.position or '—' }}</div>
+              <div class="job-company">{{ job.company or '—' }}</div>
+            </div>
+            <div class="job-dates">
+              {{ job.start_date or '?' }} — {% if job.is_current %}по н.в.{% else %}{{ job.end_date or '?' }}{% endif %}
+            </div>
+          </div>
+          {% if job.responsibilities %}
+          <div class="job-section">
+            <div class="job-section-title">Обязанности</div>
+            <ul class="job-list">
+              {% for r in job.responsibilities %}
+              <li>{{ r }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+          {% if job.achievements %}
+          <div class="job-section">
+            <div class="job-section-title">Достижения</div>
+            <ul class="job-list">
+              {% for a in job.achievements %}
+              <li>{% if a is mapping %}{{ a.text or a | string }}{% else %}{{ a }}{% endif %}</li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Skills -->
+    {% if skills %}
+    <div class="card" style="margin-bottom: 20px;">
+      <div class="card-header">
+        <h2 class="card-title">Навыки</h2>
+        <span class="card-subtitle">{{ skills|length }} навыков</span>
+      </div>
+      <div class="card-body">
+        <div class="skills-list">
+          {% for skill in skills %}
+          <span class="skill-tag skill-{{ skill.category }}">{{ skill.name }}</span>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Education -->
+    {% if education %}
+    <div class="card" style="margin-bottom: 20px;">
+      <div class="card-header">
+        <h2 class="card-title">Образование</h2>
+      </div>
+      <div class="card-body" style="padding: 0;">
+        {% for edu in education %}
+        <div class="job-item {% if not loop.last %}job-item--border{% endif %}">
+          <div class="job-header">
+            <div>
+              <div class="job-title">{{ edu.institution or '—' }}</div>
+              <div class="job-company">{{ edu.degree or '' }}{% if edu.degree and edu.field %} — {% endif %}{{ edu.field or '' }}</div>
+            </div>
+            <div class="job-dates">{{ edu.year or '—' }}</div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Extras from interview state -->
+    {% if extras %}
+    <div class="card" style="margin-bottom: 20px;">
+      <div class="card-header">
+        <h2 class="card-title">Дополнительная информация</h2>
+      </div>
+      <div class="card-body">
+        <p class="text-body">{{ extras }}</p>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Resumes -->
+    <div class="card">
+      <div class="card-header">
+        <h2 class="card-title">Резюме</h2>
+        <span class="card-subtitle">{{ resumes|length }} версий</span>
+      </div>
+      {% if resumes %}
+        {% for resume in resumes %}
+        <div class="resume-item {% if not loop.last %}resume-item--border{% endif %}">
+          <div class="resume-item-header">
+            <div>
+              <a href="/resumes/{{ resume.id }}" class="resume-title">{{ resume.title or 'Без названия' }}</a>
+              <span class="resume-version">v{{ resume.version or 1 }}</span>
+            </div>
+            <div class="cell-muted cell-nowrap" style="font-size: 13px;">{{ resume.created_at | format_dt }}</div>
+          </div>
+          {% if resume.content %}
+          <pre class="resume-preview">{{ resume.content | truncate_text(300) }}</pre>
+          {% endif %}
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="card-body">
+          <p class="cell-muted">Резюме ещё не создавались</p>
+        </div>
+      {% endif %}
+    </div>
+
+  </div><!-- /.detail-main -->
+</div>
+{% endblock %}

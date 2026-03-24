@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Пользователи — Resume Bot Admin{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title">Пользователи</h1>
+    <p class="page-subtitle">{{ users|length }} пользователей в базе</p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Telegram ID</th>
+          <th>Username</th>
+          <th>Стадия</th>
+          <th>Зарегистрирован</th>
+          <th>Последняя активность</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if users %}
+          {% for u in users %}
+          <tr class="clickable-row" onclick="location.href='/users/{{ u.id }}'">
+            <td>
+              <a href="/users/{{ u.id }}" class="table-link mono">{{ u.id }}</a>
+            </td>
+            <td>
+              {% if u.telegram_username %}
+                <span class="username">@{{ u.telegram_username }}</span>
+              {% else %}
+                <span class="cell-muted">—</span>
+              {% endif %}
+            </td>
+            <td>
+              <span class="stage-badge stage-{{ u.current_stage }}">
+                {{ u.current_stage | stage_label }}
+              </span>
+            </td>
+            <td class="cell-muted cell-nowrap">{{ u.created_at | format_dt }}</td>
+            <td class="cell-muted cell-nowrap">{{ u.last_active_at | time_ago }}</td>
+          </tr>
+          {% endfor %}
+        {% else %}
+          <tr>
+            <td colspan="5" class="empty-row">Пользователей пока нет</td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
