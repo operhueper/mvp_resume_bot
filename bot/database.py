@@ -45,18 +45,18 @@ async def get_or_create_user(telegram_id: int, telegram_username: str | None = N
             lambda: db.table("rb_users")
             .select("*")
             .eq("id", telegram_id)
-            .maybe_single()
+            .limit(1)
             .execute()
         )
-        if result.data:
-            # Update last_active_at
+        rows = result.data if result and result.data else []
+        if rows:
             await asyncio.to_thread(
                 lambda: db.table("rb_users")
                 .update({"last_active_at": "now()"})
                 .eq("id", telegram_id)
                 .execute()
             )
-            return result.data
+            return rows[0]
 
         insert_result = await asyncio.to_thread(
             lambda: db.table("rb_users")
@@ -113,11 +113,12 @@ async def get_interview_state(user_id: int) -> dict | None:
             lambda: db.table("rb_users")
             .select("interview_state")
             .eq("id", user_id)
-            .maybe_single()
+            .limit(1)
             .execute()
         )
-        if result.data:
-            return result.data.get("interview_state") or {}
+        rows = result.data if result and result.data else []
+        if rows:
+            return rows[0].get("interview_state") or {}
         return None
     except Exception as exc:
         logger.error("get_interview_state error: %s", exc)
@@ -136,11 +137,13 @@ async def save_candidate_profile(user_id: int, profile_data: dict) -> str:
             lambda: db.table("rb_candidate_profiles")
             .select("id")
             .eq("user_id", user_id)
-            .maybe_single()
+            .limit(1)
             .execute()
         )
-        if existing.data:
-            profile_id = existing.data["id"]
+        existing_rows = existing.data if existing and existing.data else []
+        if existing_rows:
+            existing_data = existing_rows[0]
+            profile_id = existing_data["id"]
             await asyncio.to_thread(
                 lambda: db.table("rb_candidate_profiles")
                 .update({**profile_data, "updated_at": "now()"})
@@ -167,10 +170,11 @@ async def get_candidate_profile(user_id: int) -> dict | None:
             lambda: db.table("rb_candidate_profiles")
             .select("*")
             .eq("user_id", user_id)
-            .maybe_single()
+            .limit(1)
             .execute()
         )
-        return result.data if result.data else None
+        rows = result.data if result and result.data else []
+        return rows[0] if rows else None
     except Exception as exc:
         logger.error("get_candidate_profile error: %s", exc)
         return None
